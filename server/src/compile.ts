@@ -50,10 +50,11 @@ export async function compilePlanFile(planSourcePath: string): Promise<CompileRe
       external: [],
       alias: {
         "@web-planner/kit": kitDir(),
-        "preact/jsx-runtime": "preact/jsx-runtime",
-        "preact/jsx-dev-runtime": "preact/jsx-dev-runtime",
-        preact: "preact",
       },
+      // Resolve preact/jsx-runtime upward from the kit source dir. esbuild's
+      // alias values resolve from cwd (the client's project), which may not
+      // have preact installed — but the web-planner install always does.
+      nodePaths: [resolve(__dirname, "..", "..", "node_modules")],
       logLevel: "silent",
     });
 
