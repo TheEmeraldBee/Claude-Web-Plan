@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.js";
 import { state } from "./state.js";
 import { Storage } from "./storage.js";
-import { compilePlanFile } from "./compile.js";
+import { compilePlanFile, invalidate } from "./compile.js";
 import { buildTree } from "./layout.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -148,6 +148,20 @@ async function handleComment(req: IncomingMessage, res: ServerResponse) {
   }
 }
 
+async function handleDeletePlan(req: IncomingMessage, res: ServerResponse) {
+  const body = await readBody(req);
+  let parsed: { project?: string; planId?: string };
+  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
+  const { project, planId } = parsed;
+  if (!project || !planId) return sendJson(res, 400, { error: "missing_fields" });
+  const rec = storage.readPlan(project, planId);
+  if (!rec) return sendJson(res, 404, { error: "plan_not_found" });
+  storage.deletePlan(project, planId);
+  invalidate(storage.basePath(project, planId) + ".plan.tsx");
+  state.broadcast({ type: "plan.deleted", planId, project });
+  sendJson(res, 200, { ok: true });
+}
+
 async function handleFeedback(req: IncomingMessage, res: ServerResponse) {
   const body = await readBody(req);
   let parsed: { project?: string; planId?: string };
@@ -262,11 +276,14 @@ async function renderBuiltinTab(project: string, tabId: string): Promise<string>
       return `<section class="plan-section">
         <h3>${escapeHtml(label)} <span class="muted">(${items.length})</span></h3>
         <div class="plan-list">
-          ${items.map((p) => `<a class="plan-row" href="/plans/${encodeURIComponent(project)}/${encodeURIComponent(p.id)}">
-            <span class="plan-title">${escapeHtml(p.title)}</span>
-            <span class="badge status-${escapeHtml(p.status)}">${escapeHtml(p.status)}</span>
-            <span class="when">${escapeHtml(p.modified.slice(0,16))}</span>
-          </a>`).join("")}
+          ${items.map((p) => `<div class="plan-row-wrap">
+            <a class="plan-row" href="/plans/${encodeURIComponent(project)}/${encodeURIComponent(p.id)}">
+              <span class="plan-title">${escapeHtml(p.title)}</span>
+              <span class="badge status-${escapeHtml(p.status)}">${escapeHtml(p.status)}</span>
+              <span class="when">${escapeHtml(p.modified.slice(0,16))}</span>
+            </a>
+            <button type="button" class="plan-row-delete" data-plan-id="${escapeHtml(p.id)}" data-plan-title="${escapeHtml(p.title)}" data-plan-status="${escapeHtml(p.status)}" title="delete plan">×</button>
+          </div>`).join("")}
         </div>
       </section>`;
     };
@@ -381,6 +398,7 @@ async function router(req: IncomingMessage, res: ServerResponse) {
     if (m === "POST" && url.pathname === "/api/message") return handleMessage(req, res);
     if (m === "POST" && url.pathname === "/api/feedback") return handleFeedback(req, res);
     if (m === "POST" && url.pathname === "/api/comment") return handleComment(req, res);
+    if (m === "POST" && url.pathname === "/api/plan/delete") return handleDeletePlan(req, res);
     const ansMatch = url.pathname.match(/^\/api\/answer\/([\w-]+)$/);
     if (m === "POST" && ansMatch) return handleAnswer(req, res, ansMatch[1] as string);
 

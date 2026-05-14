@@ -4,6 +4,7 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -199,6 +200,16 @@ export class Storage {
     const base = this.basePath(project, planId);
     atomicWrite(base + NOTES_SUFFIX, JSON.stringify(rec.notes, null, 2));
     return rec;
+  }
+
+  deletePlan(project: string, planId: string): boolean {
+    const base = this.basePath(project, planId);
+    let removed = false;
+    for (const ext of [SOURCE_SUFFIX, META_SUFFIX, NOTES_SUFFIX]) {
+      const p = base + ext;
+      if (existsSync(p)) { rmSync(p); removed = true; }
+    }
+    return removed;
   }
 
   setStatus(project: string, planId: string, status: PlanStatus): PlanRecord {

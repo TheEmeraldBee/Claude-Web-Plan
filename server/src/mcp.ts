@@ -9,9 +9,20 @@ import { spawn } from "node:child_process";
 
 import { startHttp, config, storage } from "./http.js";
 import { state, type AskedQuestion } from "./state.js";
-import { appendBlock, replaceBlock, validatePlanSource } from "./blocks.js";
+import {
+  appendBlock,
+  blockIdsIn,
+  replaceBlock,
+  validatePlanSource,
+  validateReplacementBlock,
+} from "./blocks.js";
 import { projectSlugFromCwd } from "./config.js";
-import { compilePlanFile, invalidate } from "./compile.js";
+import {
+  compilePlanFile,
+  compileSourceForValidation,
+  invalidate,
+  PlanCompileError,
+} from "./compile.js";
 import { startWatch } from "./layout.js";
 
 // ---------- helpers ----------
@@ -21,6 +32,18 @@ function ok(text: unknown) {
 }
 function err(message: string) {
   return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true };
+}
+
+function formatCompileError(e: unknown): string {
+  if (e instanceof PlanCompileError) {
+    const d = e.detail;
+    if (d.line !== undefined) {
+      const lt = d.lineText ? `\n  ${d.lineText.trim()}` : "";
+      return `${d.file ?? "plan.tsx"}:${d.line}:${d.column ?? 0} ${d.text ?? e.message}${lt}`;
+    }
+    return d.text ? `${d.file ?? "plan.tsx"}: ${d.text}` : e.message;
+  }
+  return e instanceof Error ? e.message : String(e);
 }
 
 function nowId(slug: string): string {
@@ -122,6 +145,25 @@ const GetProjectSchema = z.object({
   project: z.string().optional(),
 });
 
+const DeletePlanSchema = z.object({
+  project: z.string().optional(),
+  plan_id: z.string(),
+});
+
+const CheckSchema = z.object({
+  project: z.string().optional(),
+  plan_id: z.string().optional(),
+  tab_id: z.string().optional(),
+});
+
+interface CheckItem {
+  kind: "plan" | "tab";
+  id: string;
+  ok: boolean;
+  error?: string;
+  block_ids?: string[];
+}
+
 // ---------- defaults ----------
 
 function defaultProject(arg?: string): string {
@@ -170,7 +212,12 @@ async function callToolImpl(name: string, args: unknown): Promise<{ content: { t
     case "create_plan": {
       const a = CreatePlanSchema.parse(args);
       const project = defaultProject(a.project);
-      validatePlanSource(a.source);
+      try { validatePlanSource(a.source); }
+      catch (e) { return err(e instanceof Error ? e.message : String(e)); }
+      // Dry-compile before persisting so the agent never sees ok for a plan
+      // that won't render.
+      try { await compileSourceForValidation(a.source, slugify(a.title)); }
+      catch (e) { return err(`compile_failed: ${formatCompileError(e)}`); }
       const slug = slugify(a.title);
       const id = nowId(slug);
       const now = new Date().toISOString();
@@ -191,8 +238,15 @@ async function callToolImpl(name: string, args: unknown): Promise<{ content: { t
       const rec = storage.readPlan(project, a.plan_id);
       if (!rec) return err(`plan_not_found: ${a.plan_id}`);
       if (rec.meta.status === "implemented") return err("plan_frozen");
-      const next = replaceBlock(rec.source, a.block_id, a.replacement);
-      validatePlanSource(next);
+      try { validateReplacementBlock(a.replacement, a.block_id); }
+      catch (e) { return err(e instanceof Error ? e.message : String(e)); }
+      let next: string;
+      try { next = replaceBlock(rec.source, a.block_id, a.replacement); }
+      catch (e) { return err(e instanceof Error ? e.message : String(e)); }
+      try { validatePlanSource(next); }
+      catch (e) { return err(e instanceof Error ? e.message : String(e)); }
+      try { await compileSourceForValidation(next, a.plan_id); }
+      catch (e) { return err(`compile_failed: ${formatCompileError(e)}`); }
       storage.updateSource(project, a.plan_id, next);
       invalidate(storage.basePath(project, a.plan_id) + ".plan.tsx");
       state.broadcast({ type: "block.updated", planId: a.plan_id, project, blockId: a.block_id });
@@ -205,25 +259,36 @@ async function callToolImpl(name: string, args: unknown): Promise<{ content: { t
       const rec = storage.readPlan(project, a.plan_id);
       if (!rec) return err(`plan_not_found: ${a.plan_id}`);
       if (rec.meta.status === "implemented") return err("plan_frozen");
-      const next = appendBlock(rec.source, a.source, a.after_block_id);
-      validatePlanSource(next);
+      const appendedIds = blockIdsIn(a.source);
+      if (appendedIds.length === 0) return err("appended_source_missing_block: append_block source must contain at least one <Block id=\"…\">…</Block>");
+      let next: string;
+      try { next = appendBlock(rec.source, a.source, a.after_block_id); }
+      catch (e) { return err(e instanceof Error ? e.message : String(e)); }
+      try { validatePlanSource(next); }
+      catch (e) { return err(e instanceof Error ? e.message : String(e)); }
+      try { await compileSourceForValidation(next, a.plan_id); }
+      catch (e) { return err(`compile_failed: ${formatCompileError(e)}`); }
       storage.updateSource(project, a.plan_id, next);
       invalidate(storage.basePath(project, a.plan_id) + ".plan.tsx");
-      const idMatch = a.source.match(/id\s*=\s*["']([^"']+)["']/);
-      state.broadcast({ type: "block.appended", planId: a.plan_id, project, blockId: idMatch?.[1] });
-      return ok({ plan_id: a.plan_id, block_id: idMatch?.[1] ?? null });
+      for (const blockId of appendedIds) {
+        state.broadcast({ type: "block.appended", planId: a.plan_id, project, blockId });
+      }
+      return ok({ plan_id: a.plan_id, block_ids: appendedIds });
     }
 
     case "register_component": {
       const a = RegisterComponentSchema.parse(args);
       const project = defaultProject(a.project);
-      storage.appendComponent(project, a.name, a.source);
-      return ok({ name: a.name });
+      try { storage.appendComponent(project, a.name, a.source); }
+      catch (e) { return err(e instanceof Error ? e.message : String(e)); }
+      return ok({ name: a.name, hint: "import this component in your plan/tab source. Run `check` to confirm everything still compiles." });
     }
 
     case "set_plan_status": {
       const a = SetStatusSchema.parse(args);
       const project = defaultProject(a.project);
+      const rec = storage.readPlan(project, a.plan_id);
+      if (!rec) return err(`plan_not_found: ${a.plan_id}`);
       storage.setStatus(project, a.plan_id, a.status);
       state.broadcast({ type: "plan.status", planId: a.plan_id, project, status: a.status });
       return ok({ plan_id: a.plan_id, status: a.status });
@@ -252,8 +317,8 @@ async function callToolImpl(name: string, args: unknown): Promise<{ content: { t
         const sourcePath = storage.basePath(project, a.plan_id) + ".plan.tsx";
         const compiled = await compilePlanFile(sourcePath);
         return ok({ meta: rec.meta, source: rec.source, notes: rec.notes, block_ids: compiled.blockIds, has_mermaid: compiled.hasMermaid });
-      } catch {
-        return ok({ meta: rec.meta, source: rec.source, notes: rec.notes });
+      } catch (e) {
+        return ok({ meta: rec.meta, source: rec.source, notes: rec.notes, compile_error: formatCompileError(e) });
       }
     }
 
@@ -277,7 +342,10 @@ async function callToolImpl(name: string, args: unknown): Promise<{ content: { t
     case "update_tab": {
       const a = (name === "create_tab" ? CreateTabSchema : UpdateTabSchema).parse(args);
       const project = defaultProject(a.project);
-      validatePlanSource(a.source);
+      try { validatePlanSource(a.source); }
+      catch (e) { return err(e instanceof Error ? e.message : String(e)); }
+      try { await compileSourceForValidation(a.source, `tab-${a.id}`); }
+      catch (e) { return err(`compile_failed: ${formatCompileError(e)}`); }
       const title = ("title" in a && a.title) ? a.title : a.id;
       storage.writeTab(project, a.id, title, a.source);
       invalidate(storage.tabPath(project, a.id));
@@ -299,6 +367,63 @@ async function callToolImpl(name: string, args: unknown): Promise<{ content: { t
       const url = `http://localhost:${config.port}${path}`;
       maybeOpen(url, "always");
       return ok({ url });
+    }
+
+    case "delete_plan": {
+      const a = DeletePlanSchema.parse(args);
+      const project = defaultProject(a.project);
+      const rec = storage.readPlan(project, a.plan_id);
+      if (!rec) return err(`plan_not_found: ${a.plan_id}`);
+      const removed = storage.deletePlan(project, a.plan_id);
+      invalidate(storage.basePath(project, a.plan_id) + ".plan.tsx");
+      state.broadcast({ type: "plan.deleted", planId: a.plan_id, project });
+      return ok({ deleted: removed, plan_id: a.plan_id, project });
+    }
+
+    case "check": {
+      const a = CheckSchema.parse(args);
+      const project = defaultProject(a.project);
+      const meta = storage.readProject(project);
+      if (!meta) return err(`project_not_found: ${project}`);
+      const items: CheckItem[] = [];
+
+      const plans = a.plan_id
+        ? (storage.readPlan(project, a.plan_id) ? [{ id: a.plan_id }] : [])
+        : storage.listPlans(project).map((p) => ({ id: p.id }));
+      if (a.plan_id && plans.length === 0) return err(`plan_not_found: ${a.plan_id}`);
+
+      const tabs = a.tab_id
+        ? meta.tabs.filter((t) => t.kind === "custom" && t.id === a.tab_id)
+        : meta.tabs.filter((t) => t.kind === "custom");
+      if (a.tab_id && tabs.length === 0) return err(`tab_not_found: ${a.tab_id}`);
+
+      // If both plan_id and tab_id were omitted we check everything;
+      // if one was given, narrow accordingly.
+      const checkPlans = a.tab_id ? [] : plans;
+      const checkTabs = a.plan_id && !a.tab_id ? [] : tabs;
+
+      for (const p of checkPlans) {
+        const path = storage.basePath(project, p.id) + ".plan.tsx";
+        invalidate(path);
+        try {
+          const r = await compilePlanFile(path);
+          items.push({ kind: "plan", id: p.id, ok: true, block_ids: r.blockIds });
+        } catch (e) {
+          items.push({ kind: "plan", id: p.id, ok: false, error: formatCompileError(e) });
+        }
+      }
+      for (const t of checkTabs) {
+        const path = storage.tabPath(project, t.id);
+        invalidate(path);
+        try {
+          const r = await compilePlanFile(path);
+          items.push({ kind: "tab", id: t.id, ok: true, block_ids: r.blockIds });
+        } catch (e) {
+          items.push({ kind: "tab", id: t.id, ok: false, error: formatCompileError(e) });
+        }
+      }
+      const allOk = items.every((i) => i.ok);
+      return ok({ project, ok: allOk, items });
     }
 
     default:
@@ -325,19 +450,21 @@ function maybeOpen(url: string, policy: "always" | "on-ask" | "never") {
 const TOOLS = [
   { name: "wait_for_message", description: "Block until the user sends a message (browser chat, wp send, or feedback bundle). No timeout. The planner's outer-loop primitive.", inputSchema: { type: "object", properties: {} } },
   { name: "ask_user", description: "Push structured questions to the browser; block until the user submits. Times out cleanly.", inputSchema: { type: "object", properties: { questions: { type: "array" }, timeout_seconds: { type: "number" } }, required: ["questions"] } },
-  { name: "create_plan", description: "Submit a full .plan.tsx source. Server validates structure + block ids and stores it.", inputSchema: { type: "object", properties: { title: { type: "string" }, source: { type: "string" }, project: { type: "string" } }, required: ["title","source"] } },
-  { name: "update_block", description: "Replace one <Block id='...'> in a plan. Rejected on implemented plans.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, block_id: { type: "string" }, replacement: { type: "string" }, project: { type: "string" } }, required: ["plan_id","block_id","replacement"] } },
-  { name: "append_block", description: "Insert a new <Block> after an existing one (or at end).", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, source: { type: "string" }, after_block_id: { type: "string" }, project: { type: "string" } }, required: ["plan_id","source"] } },
-  { name: "register_component", description: "Append a Preact component to the project's components.tsx for use as a new block kind.", inputSchema: { type: "object", properties: { name: { type: "string" }, source: { type: "string" }, project: { type: "string" } }, required: ["name","source"] } },
-  { name: "set_plan_status", description: "Move plan between proposed/approved/implemented/abandoned. Implemented plans become read-only.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, status: { type: "string" }, project: { type: "string" } }, required: ["plan_id","status"] } },
+  { name: "create_plan", description: "Submit a full .plan.tsx source. Server validates structure + block ids and dry-compiles before persisting; on compile_failed the plan is NOT saved.", inputSchema: { type: "object", properties: { title: { type: "string" }, source: { type: "string" }, project: { type: "string" } }, required: ["title","source"] } },
+  { name: "update_block", description: "Replace one <Block id='...'> in a plan. Replacement MUST be exactly one <Block> with the same id. Server dry-compiles the resulting plan; rejected on implemented plans.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, block_id: { type: "string" }, replacement: { type: "string" }, project: { type: "string" } }, required: ["plan_id","block_id","replacement"] } },
+  { name: "append_block", description: "Insert one or more new <Block>s after an existing one (or before </Plan>). Server dry-compiles before persisting.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, source: { type: "string" }, after_block_id: { type: "string" }, project: { type: "string" } }, required: ["plan_id","source"] } },
+  { name: "register_component", description: "Append a Preact component to the project's components.tsx for use as a new block kind. You must then import it in your plan/tab source.", inputSchema: { type: "object", properties: { name: { type: "string" }, source: { type: "string" }, project: { type: "string" } }, required: ["name","source"] } },
+  { name: "set_plan_status", description: "Move plan between proposed/approved/implemented/abandoned. Implemented plans become read-only (but can still be delete_plan'd).", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, status: { type: "string" }, project: { type: "string" } }, required: ["plan_id","status"] } },
   { name: "set_state", description: "Override the implicit activity state (e.g. 'implementing' while running edits).", inputSchema: { type: "object", properties: { state: { type: "string" } }, required: ["state"] } },
   { name: "list_plans", description: "List plans for a project (or all projects).", inputSchema: { type: "object", properties: { project: { type: "string" } } } },
-  { name: "get_plan", description: "Read a plan: source, notes, block ids.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, project: { type: "string" } }, required: ["plan_id"] } },
+  { name: "get_plan", description: "Read a plan: source, notes, block ids. Includes compile_error if the persisted plan currently fails to render.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, project: { type: "string" } }, required: ["plan_id"] } },
   { name: "open_in_browser", description: "Spawn the configured open-command against a plan or the dashboard.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, project: { type: "string" } } } },
   { name: "set_project_meta", description: "Set a project's name, description, and/or watchPath (the source directory shown in the Layout tab).", inputSchema: { type: "object", properties: { project: { type: "string" }, name: { type: "string" }, description: { type: "string" }, watch_path: { type: "string" } } } },
-  { name: "create_tab", description: "Create a custom tab on a project's page from a Preact .tab.tsx source. id must be lowercase kebab.", inputSchema: { type: "object", properties: { project: { type: "string" }, id: { type: "string" }, title: { type: "string" }, source: { type: "string" } }, required: ["id","title","source"] } },
-  { name: "update_tab", description: "Update an existing custom tab's source.", inputSchema: { type: "object", properties: { project: { type: "string" }, id: { type: "string" }, title: { type: "string" }, source: { type: "string" } }, required: ["id","source"] } },
+  { name: "create_tab", description: "Create a custom tab on a project's page from a Preact .tab.tsx source. id must be lowercase kebab. Dry-compiled before persisting.", inputSchema: { type: "object", properties: { project: { type: "string" }, id: { type: "string" }, title: { type: "string" }, source: { type: "string" } }, required: ["id","title","source"] } },
+  { name: "update_tab", description: "Update an existing custom tab's source. Dry-compiled before persisting.", inputSchema: { type: "object", properties: { project: { type: "string" }, id: { type: "string" }, title: { type: "string" }, source: { type: "string" } }, required: ["id","source"] } },
   { name: "get_project", description: "Read project metadata (name, description, watchPath, tabs).", inputSchema: { type: "object", properties: { project: { type: "string" } } } },
+  { name: "delete_plan", description: "Permanently delete a plan (source + meta + notes). Allowed on any status, including implemented. Broadcasts plan.deleted on SSE.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, project: { type: "string" } }, required: ["plan_id"] } },
+  { name: "check", description: "Re-compile a plan, a custom tab, or every plan + custom tab in a project. Returns { ok, items: [{ kind, id, ok, error?, block_ids? }] }. Call after every create/update to confirm the persisted state renders.", inputSchema: { type: "object", properties: { project: { type: "string" }, plan_id: { type: "string" }, tab_id: { type: "string" } } } },
 ];
 
 function spawnExistingWatchers() {

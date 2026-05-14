@@ -79,6 +79,53 @@
   // initial mount if layout is the active tab on first paint
   if (page.getAttribute("data-active-tab") === "layout") loadLayout();
 
+  // ---------- Plans-tab row delete ----------
+  async function refetchActiveTab() {
+    const active = page.getAttribute("data-active-tab") || "plans";
+    try {
+      const r = await fetch(`/projects/${encodeURIComponent(project)}/tab/${encodeURIComponent(active)}`);
+      panel.innerHTML = await r.text();
+      if (active === "layout") loadLayout();
+      if (window.__renderMermaid) window.__renderMermaid();
+    } catch (e) {
+      panel.innerHTML = `<pre>${String(e)}</pre>`;
+    }
+  }
+
+  document.addEventListener("click", async (ev) => {
+    const target = ev.target;
+    if (!(target instanceof HTMLElement)) return;
+    const btn = target.closest(".plan-row-delete");
+    if (!btn) return;
+    ev.preventDefault();
+    const planId = btn.getAttribute("data-plan-id");
+    const planTitle = btn.getAttribute("data-plan-title") || planId;
+    const status = btn.getAttribute("data-plan-status");
+    if (!planId) return;
+    const frozen = status === "implemented";
+    const msg = frozen
+      ? `"${planTitle}" is implemented — delete anyway? This is permanent.`
+      : `Delete "${planTitle}"? This is permanent.`;
+    if (!confirm(msg)) return;
+    btn.disabled = true;
+    try {
+      const r = await fetch("/api/plan/delete", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ project, planId }),
+      });
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}));
+        alert("delete failed: " + (e.error || r.status));
+        btn.disabled = false;
+      }
+      // Refresh handled by SSE plan.deleted.
+    } catch (e) {
+      alert("delete failed: " + e);
+      btn.disabled = false;
+    }
+  });
+
   // ---------- SSE: layout:changed + tab.updated ----------
   // Reuse the existing app.js EventSource? app.js owns one. To avoid two
   // connections we listen to a custom event app.js dispatches, OR open
@@ -100,6 +147,10 @@
     if (msg.type === "project.updated" && msg.project === project) {
       // reload to pick up new tabs / description / watchPath
       setTimeout(() => location.reload(), 200);
+    }
+    if ((msg.type === "plan.deleted" || msg.type === "plan.created" || msg.type === "plan.status") && msg.project === project) {
+      const active = page.getAttribute("data-active-tab");
+      if (active === "plans") refetchActiveTab();
     }
   };
 })();

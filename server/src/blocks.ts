@@ -69,6 +69,33 @@ export interface PlanValidation {
   hasPlanRoot: boolean;
 }
 
+/**
+ * Validates that a replacement string for update_block is exactly one <Block>
+ * whose id matches the expected id. Prevents the agent from silently dropping
+ * a commented block by renaming it during a replacement.
+ */
+export function validateReplacementBlock(replacement: string, expectedId: string): void {
+  const blocks = findBlocks(replacement);
+  if (blocks.length === 0) {
+    throw new Error(`replacement_missing_block: replacement must contain a <Block id="${expectedId}"> element`);
+  }
+  if (blocks.length > 1) {
+    throw new Error(`replacement_multiple_blocks: update_block expects exactly one <Block>, got ${blocks.length}. Use append_block for additions.`);
+  }
+  const got = blocks[0]!.id;
+  if (got !== expectedId) {
+    throw new Error(`block_id_mismatch: expected id "${expectedId}", replacement has id "${got}". To rename, edit the source manually then create a new plan.`);
+  }
+}
+
+/**
+ * Returns the ids of every <Block> in an arbitrary source fragment. Used by
+ * append_block to broadcast every newly-appended id.
+ */
+export function blockIdsIn(source: string): string[] {
+  return findBlocks(source).map((b) => b.id);
+}
+
 export function validatePlanSource(source: string): PlanValidation {
   try {
     transformSync(source, {

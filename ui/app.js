@@ -45,6 +45,14 @@
       // crude reload on the plan page when affected
       if (PLAN && msg.planId === PLAN.id) setTimeout(() => location.reload(), 200);
     }
+    if (msg.type === "plan.deleted") {
+      if (PLAN && msg.planId === PLAN.id) {
+        location.href = "/projects/" + encodeURIComponent(PLAN.project);
+      } else if (!PLAN && location.pathname === "/") {
+        // dashboard — refresh counts
+        setTimeout(() => location.reload(), 150);
+      }
+    }
   };
   es.onerror = () => { pillName.textContent = "disconnected"; };
 
@@ -105,6 +113,42 @@
     });
 
     mountFeedbackBar();
+    mountDeleteButton();
+  }
+
+  function mountDeleteButton() {
+    const header = document.querySelector(".plan .plan-header .plan-meta");
+    if (!header) return;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "plan-delete-btn";
+    btn.textContent = "Delete";
+    btn.addEventListener("click", async () => {
+      const frozen = PLAN.status === "implemented";
+      const msg = frozen
+        ? "Plan is implemented — delete anyway? This is permanent."
+        : "Delete this plan? This is permanent.";
+      if (!confirm(msg)) return;
+      btn.disabled = true;
+      try {
+        const r = await fetch("/api/plan/delete", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ project: PLAN.project, planId: PLAN.id }),
+        });
+        if (r.ok) {
+          location.href = "/projects/" + encodeURIComponent(PLAN.project);
+        } else {
+          const e = await r.json().catch(() => ({}));
+          alert("delete failed: " + (e.error || r.status));
+          btn.disabled = false;
+        }
+      } catch (e) {
+        alert("delete failed: " + e);
+        btn.disabled = false;
+      }
+    });
+    header.appendChild(btn);
   }
 
   function openCommentPopover(blockId) {
