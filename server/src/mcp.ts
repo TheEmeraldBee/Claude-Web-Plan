@@ -12,6 +12,7 @@ import { state, type AskedQuestion } from "./state.js";
 import { appendBlock, replaceBlock, validatePlanSource } from "./blocks.js";
 import { projectSlugFromCwd } from "./config.js";
 import { compilePlanFile, invalidate } from "./compile.js";
+import { startWatch } from "./layout.js";
 
 // ---------- helpers ----------
 
@@ -94,6 +95,31 @@ const ListPlansSchema = z.object({
 const OpenSchema = z.object({
   project: z.string().optional(),
   plan_id: z.string().optional(),
+});
+
+const SetProjectMetaSchema = z.object({
+  project: z.string().optional(),
+  name: z.string().optional(),
+  description: z.string().optional(),
+  watch_path: z.string().optional(),
+});
+
+const CreateTabSchema = z.object({
+  project: z.string().optional(),
+  id: z.string().regex(/^[a-z][a-z0-9-]*$/),
+  title: z.string().min(1),
+  source: z.string().min(1),
+});
+
+const UpdateTabSchema = z.object({
+  project: z.string().optional(),
+  id: z.string().regex(/^[a-z][a-z0-9-]*$/),
+  title: z.string().optional(),
+  source: z.string().min(1),
+});
+
+const GetProjectSchema = z.object({
+  project: z.string().optional(),
 });
 
 // ---------- defaults ----------
@@ -231,6 +257,42 @@ async function callToolImpl(name: string, args: unknown): Promise<{ content: { t
       }
     }
 
+    case "set_project_meta": {
+      const a = SetProjectMetaSchema.parse(args);
+      const project = defaultProject(a.project);
+      storage.ensureProject(project);
+      const patch: { name?: string; description?: string; watchPath?: string } = {};
+      if (a.name !== undefined) patch.name = a.name;
+      if (a.description !== undefined) patch.description = a.description;
+      if (a.watch_path !== undefined) patch.watchPath = a.watch_path;
+      const next = storage.setProjectMeta(project, patch);
+      if (patch.watchPath !== undefined) {
+        startWatch(project, next.watchPath, (p) => state.broadcast({ type: "layout:changed", project: p }));
+      }
+      state.broadcast({ type: "project.updated", project });
+      return ok(next);
+    }
+
+    case "create_tab":
+    case "update_tab": {
+      const a = (name === "create_tab" ? CreateTabSchema : UpdateTabSchema).parse(args);
+      const project = defaultProject(a.project);
+      validatePlanSource(a.source);
+      const title = ("title" in a && a.title) ? a.title : a.id;
+      storage.writeTab(project, a.id, title, a.source);
+      invalidate(storage.tabPath(project, a.id));
+      state.broadcast({ type: "tab.updated", project, tabId: a.id });
+      return ok({ project, tab_id: a.id, title });
+    }
+
+    case "get_project": {
+      const a = GetProjectSchema.parse(args);
+      const project = defaultProject(a.project);
+      const meta = storage.readProject(project);
+      if (!meta) return err(`project_not_found: ${project}`);
+      return ok(meta);
+    }
+
     case "open_in_browser": {
       const a = OpenSchema.parse(args);
       const path = a.plan_id ? `/plans/${encodeURIComponent(defaultProject(a.project))}/${encodeURIComponent(a.plan_id)}` : "/";
@@ -272,10 +334,24 @@ const TOOLS = [
   { name: "list_plans", description: "List plans for a project (or all projects).", inputSchema: { type: "object", properties: { project: { type: "string" } } } },
   { name: "get_plan", description: "Read a plan: source, notes, block ids.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, project: { type: "string" } }, required: ["plan_id"] } },
   { name: "open_in_browser", description: "Spawn the configured open-command against a plan or the dashboard.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, project: { type: "string" } } } },
+  { name: "set_project_meta", description: "Set a project's name, description, and/or watchPath (the source directory shown in the Layout tab).", inputSchema: { type: "object", properties: { project: { type: "string" }, name: { type: "string" }, description: { type: "string" }, watch_path: { type: "string" } } } },
+  { name: "create_tab", description: "Create a custom tab on a project's page from a Preact .tab.tsx source. id must be lowercase kebab.", inputSchema: { type: "object", properties: { project: { type: "string" }, id: { type: "string" }, title: { type: "string" }, source: { type: "string" } }, required: ["id","title","source"] } },
+  { name: "update_tab", description: "Update an existing custom tab's source.", inputSchema: { type: "object", properties: { project: { type: "string" }, id: { type: "string" }, title: { type: "string" }, source: { type: "string" } }, required: ["id","source"] } },
+  { name: "get_project", description: "Read project metadata (name, description, watchPath, tabs).", inputSchema: { type: "object", properties: { project: { type: "string" } } } },
 ];
+
+function spawnExistingWatchers() {
+  for (const project of storage.listProjects()) {
+    const meta = storage.readProject(project);
+    if (meta?.watchPath) {
+      startWatch(project, meta.watchPath, (p) => state.broadcast({ type: "layout:changed", project: p }));
+    }
+  }
+}
 
 async function main() {
   await startHttp();
+  spawnExistingWatchers();
   const server = new Server({ name: "web-planner", version: "0.1.0" }, { capabilities: { tools: {} } });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));

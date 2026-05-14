@@ -809,11 +809,51 @@ wp feedback                                 # dump all comments + likes, then se
   </div>
 </section>
 
+<!-- Project pages + homepage -->
+<section class="col">
+  <h2>Project pages &amp; homepage (added after v1 ship)</h2>
+  <p>
+    The dashboard at <code>/</code> becomes a real <strong>homepage</strong>: a grid of project cards. Each card links to a per-project page at <code>/projects/&lt;slug&gt;</code>, which carries the plans <em>and</em> additional tabs describing the project itself.
+  </p>
+
+  <h3>Project page structure</h3>
+  <ul>
+    <li>Header: project name, description, watched path.</li>
+    <li>Tab bar with two built-in tabs and any custom tabs Claude adds:
+      <ul>
+        <li><strong>Plans</strong> (builtin) — every plan for this project, grouped by status. Click into a plan to view/comment.</li>
+        <li><strong>Layout</strong> (builtin) — the project's watched directory rendered as a live file tree. <code>fs.watch(path, { recursive: true })</code> drives an SSE <code>layout:changed</code> event that re-renders the tab in place.</li>
+        <li><strong>Custom tabs</strong> — Claude-authored <code>.tab.tsx</code> files compiled by the same Preact pipeline as plans. Typical tabs: Architecture, Glossary, Open Questions, Decisions Log.</li>
+      </ul>
+    </li>
+  </ul>
+
+  <h3>New MCP tools</h3>
+  <ul>
+    <li><code>set_project_meta({ project?, name?, description?, watchPath? })</code> — declare what this project is and where its source lives.</li>
+    <li><code>create_tab({ project?, id, title, source })</code> — author a new custom tab.</li>
+    <li><code>update_tab({ project?, id, source })</code> — rewrite an existing custom tab.</li>
+    <li><code>get_project({ project? })</code> — read project metadata + tab list.</li>
+  </ul>
+
+  <h3>Storage</h3>
+  <pre><code>~/.web-planner/projects/&lt;slug&gt;/
+├── project.json                  # { name, description, watchPath, tabs[] }
+├── components.tsx                # per-project components (existing)
+├── plans/&lt;ts&gt;-&lt;slug&gt;.plan.tsx    # plans (existing)
+└── tabs/&lt;id&gt;.tab.tsx             # custom tabs</code></pre>
+
+  <h3>Live layout updates</h3>
+  <p>
+    When a project has a <code>watchPath</code>, the server spawns one <code>fs.watch</code> per project. File events are debounced (200ms) and broadcast as <code>{ type:"layout:changed", project }</code>. The Layout tab subscribes; on the event it refetches <code>/api/layout/&lt;slug&gt;</code> and re-renders the tree. The walker respects <code>.git</code>, <code>node_modules</code>, <code>dist</code>, <code>target</code>, <code>.web-planner</code>, and any patterns in the project's root <code>.gitignore</code> (best-effort prefix match).
+  </p>
+</section>
+
 <!-- Next -->
 <section class="col">
   <h2>Next</h2>
   <div class="callout">
-    All decisions locked. The plan is ready for scaffolding. Reply <code>go</code> (or "implement it") and I'll start at step 1.
+    Project-page + homepage extension is being built on top of v1. The original v1 was already shipped (plans, comments, blocking loop, MCP, CLI, installer).
   </div>
 </section>
 

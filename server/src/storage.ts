@@ -27,9 +27,31 @@ export interface PlanRecord {
   notes: Record<string, string>; // blockId -> comment
 }
 
+export interface TabRef {
+  id: string;
+  title: string;
+  kind: "builtin" | "custom";
+}
+
+export interface ProjectMeta {
+  slug: string;
+  name: string;
+  description: string;
+  watchPath: string;       // absolute path to source dir; "" means none
+  tabs: TabRef[];
+  created: string;
+  modified: string;
+}
+
 const META_SUFFIX = ".meta.json";
 const SOURCE_SUFFIX = ".plan.tsx";
 const NOTES_SUFFIX = ".notes.json";
+const PROJECT_META = "project.json";
+const TAB_SUFFIX = ".tab.tsx";
+const BUILTIN_TABS: TabRef[] = [
+  { id: "plans", title: "Plans", kind: "builtin" },
+  { id: "layout", title: "Layout", kind: "builtin" },
+];
 
 function ensureDir(path: string) {
   if (!existsSync(path)) mkdirSync(path, { recursive: true });
@@ -60,10 +82,76 @@ export class Storage {
 
   ensureProject(project: string) {
     ensureDir(this.plansDir(project));
+    ensureDir(this.tabsDir(project));
     const comps = this.componentsPath(project);
     if (!existsSync(comps)) {
       atomicWrite(comps, "// per-project component extensions\n// Claude appends new components here as it invents new block kinds.\n\nexport {};\n");
     }
+    const metaPath = join(this.projectDir(project), PROJECT_META);
+    if (!existsSync(metaPath)) {
+      const now = new Date().toISOString();
+      const meta: ProjectMeta = {
+        slug: project,
+        name: project,
+        description: "",
+        watchPath: "",
+        tabs: BUILTIN_TABS.slice(),
+        created: now,
+        modified: now,
+      };
+      atomicWrite(metaPath, JSON.stringify(meta, null, 2));
+    }
+  }
+
+  tabsDir(project: string): string {
+    return join(this.projectDir(project), "tabs");
+  }
+  tabPath(project: string, tabId: string): string {
+    return join(this.tabsDir(project), tabId + TAB_SUFFIX);
+  }
+
+  readProject(project: string): ProjectMeta | null {
+    const metaPath = join(this.projectDir(project), PROJECT_META);
+    if (!existsSync(metaPath)) return null;
+    try {
+      return JSON.parse(readFileSync(metaPath, "utf8")) as ProjectMeta;
+    } catch {
+      return null;
+    }
+  }
+
+  writeProject(meta: ProjectMeta) {
+    this.ensureProject(meta.slug);
+    meta.modified = new Date().toISOString();
+    atomicWrite(join(this.projectDir(meta.slug), PROJECT_META), JSON.stringify(meta, null, 2));
+  }
+
+  setProjectMeta(project: string, patch: Partial<Pick<ProjectMeta, "name" | "description" | "watchPath">>): ProjectMeta {
+    this.ensureProject(project);
+    const existing = this.readProject(project)!;
+    const next: ProjectMeta = { ...existing, ...patch };
+    this.writeProject(next);
+    return next;
+  }
+
+  writeTab(project: string, id: string, title: string, source: string): ProjectMeta {
+    this.ensureProject(project);
+    if (!/^[a-z][a-z0-9-]*$/.test(id)) throw new Error(`invalid_tab_id: ${id} (must be lowercase kebab)`);
+    if (id === "plans" || id === "layout") throw new Error(`reserved_tab_id: ${id}`);
+    atomicWrite(this.tabPath(project, id), source);
+    const meta = this.readProject(project)!;
+    const i = meta.tabs.findIndex((t) => t.id === id);
+    const entry: TabRef = { id, title, kind: "custom" };
+    if (i === -1) meta.tabs.push(entry);
+    else meta.tabs[i] = entry;
+    this.writeProject(meta);
+    return meta;
+  }
+
+  readTabSource(project: string, id: string): string | null {
+    const path = this.tabPath(project, id);
+    if (!existsSync(path)) return null;
+    return readFileSync(path, "utf8");
   }
 
   basePath(project: string, planId: string): string {

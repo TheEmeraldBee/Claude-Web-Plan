@@ -6,6 +6,7 @@ import { loadConfig } from "./config.js";
 import { state } from "./state.js";
 import { Storage } from "./storage.js";
 import { compilePlanFile } from "./compile.js";
+import { buildTree } from "./layout.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -55,7 +56,7 @@ function serveStatic(path: string, res: ServerResponse) {
   res.end(readFileSync(path));
 }
 
-function renderShell(title: string, body: string, hasMermaid: boolean, planMeta?: { id: string; project: string; status: string; notes: Record<string, string> }): string {
+function renderShell(title: string, body: string, hasMermaid: boolean, planMeta?: { id: string; project: string; status: string; notes: Record<string, string> }, extraScripts: string = ""): string {
   return `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8" />
@@ -66,10 +67,13 @@ ${planMeta ? `<script>window.__PLAN__ = ${JSON.stringify(planMeta)};</script>` :
 ${hasMermaid ? `<script type="module">
   import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
   mermaid.initialize({ startOnLoad: false, theme: "dark", themeVariables: { background: "#1e1e2e", primaryColor: "#313244", primaryTextColor: "#cdd6f4", lineColor: "#89b4fa" } });
-  window.addEventListener("DOMContentLoaded", () => mermaid.run({ querySelector: "pre[data-mermaid]" }));
+  function renderMermaid() { mermaid.run({ querySelector: "pre[data-mermaid]:not([data-rendered])" }).then(()=>document.querySelectorAll("pre[data-mermaid]").forEach(el=>el.setAttribute("data-rendered","true"))); }
+  window.addEventListener("DOMContentLoaded", renderMermaid);
+  window.__renderMermaid = renderMermaid;
 </script>` : ""}
 </head><body><div class="page">${body}</div>
 <script type="module" src="/ui/app.js"></script>
+${extraScripts}
 </body></html>`;
 }
 
@@ -214,25 +218,136 @@ async function handleDashboard(_req: IncomingMessage, res: ServerResponse) {
       <header class="plan-header"><h1>web-planner</h1>
         <div class="plan-meta"><span class="badge">localhost:${config.port}</span></div>
       </header>
-      ${projects.length === 0 ? `<p>No plans yet. The planner agent creates them.</p>` : ""}
+      ${projects.length === 0 ? `<p class="muted">No projects yet. The planner agent creates them when it makes its first plan.</p>` : ""}
       <div class="project-grid">
         ${projects.map((p) => {
+          const meta = storage.readProject(p);
           const plans = storage.listPlans(p);
-          return `<div class="project-card">
-            <h3>${escapeHtml(p)}</h3>
-            <p>${plans.length} plan${plans.length === 1 ? "" : "s"}</p>
-            ${plans.slice(0, 5).map((pl) => `
-              <div class="plan-row">
-                <a href="/plans/${escapeHtml(p)}/${escapeHtml(pl.id)}">${escapeHtml(pl.title)}</a>
-                <span class="badge status-${escapeHtml(pl.status)}">${escapeHtml(pl.status)}</span>
-                <span class="when">${escapeHtml(pl.modified.slice(0,16))}</span>
-              </div>`).join("")}
-          </div>`;
+          const inProgress = plans.filter((pl) => pl.status === "proposed" || pl.status === "approved").length;
+          const done = plans.filter((pl) => pl.status === "implemented").length;
+          const latest = plans[0];
+          return `<a class="project-card" href="/projects/${encodeURIComponent(p)}">
+            <h3>${escapeHtml(meta?.name || p)}</h3>
+            ${meta?.description ? `<p class="project-desc">${escapeHtml(meta.description)}</p>` : ""}
+            <div class="project-stats">
+              <span><strong>${plans.length}</strong> plan${plans.length === 1 ? "" : "s"}</span>
+              <span class="dot">·</span>
+              <span class="status-proposed">${inProgress} active</span>
+              <span class="dot">·</span>
+              <span class="status-implemented">${done} done</span>
+            </div>
+            ${latest ? `<p class="project-latest">latest: <span>${escapeHtml(latest.title)}</span></p>` : ""}
+          </a>`;
         }).join("")}
       </div>
     </main>`;
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
   res.end(renderShell("web-planner", body, false));
+}
+
+function renderTabBar(active: string, tabs: { id: string; title: string; kind: string }[]): string {
+  return `<nav class="tab-bar">
+    ${tabs.map((t) => `<a class="tab ${t.id === active ? "active" : ""}" href="?tab=${encodeURIComponent(t.id)}" data-tab-id="${escapeHtml(t.id)}">${escapeHtml(t.title)}</a>`).join("")}
+  </nav>`;
+}
+
+async function renderBuiltinTab(project: string, tabId: string): Promise<string> {
+  if (tabId === "plans") {
+    const plans = storage.listPlans(project);
+    if (plans.length === 0) return `<p class="muted">No plans yet.</p>`;
+    const group = (status: string) => plans.filter((p) => p.status === status);
+    const section = (label: string, status: string) => {
+      const items = group(status);
+      if (items.length === 0) return "";
+      return `<section class="plan-section">
+        <h3>${escapeHtml(label)} <span class="muted">(${items.length})</span></h3>
+        <div class="plan-list">
+          ${items.map((p) => `<a class="plan-row" href="/plans/${encodeURIComponent(project)}/${encodeURIComponent(p.id)}">
+            <span class="plan-title">${escapeHtml(p.title)}</span>
+            <span class="badge status-${escapeHtml(p.status)}">${escapeHtml(p.status)}</span>
+            <span class="when">${escapeHtml(p.modified.slice(0,16))}</span>
+          </a>`).join("")}
+        </div>
+      </section>`;
+    };
+    return [section("Proposed", "proposed"), section("Approved", "approved"), section("Implemented", "implemented"), section("Abandoned", "abandoned")].join("");
+  }
+  if (tabId === "layout") {
+    const meta = storage.readProject(project);
+    const path = meta?.watchPath || "";
+    if (!path) {
+      return `<div class="callout callout-warn">
+        <p>No <code>watchPath</code> set for this project. The planner can set one via <code>set_project_meta</code>.</p>
+      </div>`;
+    }
+    return `<div class="layout-pane" data-project="${escapeHtml(project)}">
+      <p class="muted layout-path"><code>${escapeHtml(path)}</code></p>
+      <div class="layout-tree" data-layout-mount>loading…</div>
+    </div>`;
+  }
+  return `<p>unknown builtin tab: ${escapeHtml(tabId)}</p>`;
+}
+
+async function renderCustomTab(project: string, tabId: string): Promise<string> {
+  const path = storage.tabPath(project, tabId);
+  if (!existsSync(path)) return `<p class="muted">tab source missing</p>`;
+  const compiled = await compilePlanFile(path);
+  return compiled.html;
+}
+
+async function handleProjectPage(req: IncomingMessage, res: ServerResponse, project: string) {
+  const meta = storage.readProject(project);
+  if (!meta) return send(res, 404, "project not found");
+  const url = new URL(req.url ?? "/", `http://localhost:${config.port}`);
+  const requested = url.searchParams.get("tab") || meta.tabs[0]?.id || "plans";
+  const tab = meta.tabs.find((t) => t.id === requested) ?? meta.tabs[0]!;
+  let tabBody = "";
+  let hasMermaid = false;
+  try {
+    if (tab.kind === "builtin") tabBody = await renderBuiltinTab(project, tab.id);
+    else {
+      tabBody = await renderCustomTab(project, tab.id);
+      hasMermaid = /data-mermaid/.test(tabBody);
+    }
+  } catch (e) {
+    tabBody = `<pre>${escapeHtml(e instanceof Error ? e.message : String(e))}</pre>`;
+  }
+  const body = `<main class="project-page" data-project="${escapeHtml(project)}" data-active-tab="${escapeHtml(tab.id)}">
+    <header class="plan-header">
+      <div>
+        <h1>${escapeHtml(meta.name || project)}</h1>
+        ${meta.description ? `<p class="project-desc">${escapeHtml(meta.description)}</p>` : ""}
+        ${meta.watchPath ? `<p class="muted small"><code>${escapeHtml(meta.watchPath)}</code></p>` : ""}
+      </div>
+      <div class="plan-meta"><a class="badge" href="/">← all projects</a></div>
+    </header>
+    ${renderTabBar(tab.id, meta.tabs)}
+    <div class="tab-panel" data-tab-panel>${tabBody}</div>
+  </main>`;
+  res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+  res.end(renderShell(`${meta.name || project} — web-planner`, body, hasMermaid, undefined, `<script type="module" src="/ui/project.js"></script>`));
+}
+
+async function handleProjectTabFragment(req: IncomingMessage, res: ServerResponse, project: string, tabId: string) {
+  const meta = storage.readProject(project);
+  if (!meta) return send(res, 404, "project not found");
+  const tab = meta.tabs.find((t) => t.id === tabId);
+  if (!tab) return send(res, 404, "tab not found");
+  try {
+    const body = tab.kind === "builtin" ? await renderBuiltinTab(project, tab.id) : await renderCustomTab(project, tab.id);
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(body);
+  } catch (e) {
+    sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+async function handleLayoutApi(_req: IncomingMessage, res: ServerResponse, project: string) {
+  const meta = storage.readProject(project);
+  if (!meta) return sendJson(res, 404, { error: "project_not_found" });
+  if (!meta.watchPath) return sendJson(res, 200, { tree: null });
+  const tree = buildTree(meta.watchPath);
+  sendJson(res, 200, { tree, watchPath: meta.watchPath });
 }
 
 async function handleState(_req: IncomingMessage, res: ServerResponse) {
@@ -253,6 +368,15 @@ async function router(req: IncomingMessage, res: ServerResponse) {
     if (m === "GET" && url.pathname === "/api/stream") return handleSse(req, res);
     if (m === "GET" && url.pathname === "/api/state") return handleState(req, res);
     if (m === "GET" && url.pathname === "/api/plans") return handlePlansList(req, res);
+
+    const layoutMatch = url.pathname.match(/^\/api\/layout\/([^/]+)$/);
+    if (m === "GET" && layoutMatch) return handleLayoutApi(req, res, layoutMatch[1] as string);
+
+    const projTabMatch = url.pathname.match(/^\/projects\/([^/]+)\/tab\/([^/]+)$/);
+    if (m === "GET" && projTabMatch) return handleProjectTabFragment(req, res, projTabMatch[1] as string, projTabMatch[2] as string);
+
+    const projMatch = url.pathname.match(/^\/projects\/([^/]+)\/?$/);
+    if (m === "GET" && projMatch) return handleProjectPage(req, res, projMatch[1] as string);
 
     if (m === "POST" && url.pathname === "/api/message") return handleMessage(req, res);
     if (m === "POST" && url.pathname === "/api/feedback") return handleFeedback(req, res);
