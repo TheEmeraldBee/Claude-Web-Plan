@@ -118,9 +118,10 @@ cat > "${STORAGE_ROOT}/config.json" <<EOF
 EOF
 ok "wrote ${STORAGE_ROOT}/config.json"
 
-# --- install deps + build CLI ---
+# --- install deps + build CLI + build server bundle ---
 bold "installing dependencies"
 ( cd "$ROOT" && npm install --silent ) || die "npm install failed"
+( cd "$ROOT/server" && node build.mjs ) || die "server build failed"
 ( cd "$ROOT/cli" && node build.mjs ) || die "wp build failed"
 
 # --- install wp ---
@@ -153,13 +154,12 @@ if [ "$REG_MCP" = "yes" ]; then
   fi
   if command -v jq >/dev/null 2>&1; then
     TMP="$(mktemp)"
-    jq --arg cwd "$ROOT" \
-       --arg entry "${ROOT}/server/src/mcp.ts" \
+    jq --arg entry "${ROOT}/server/dist/mcp.mjs" \
        --arg cfg "${STORAGE_ROOT}/config.json" '
       .mcpServers = (.mcpServers // {}) |
       .mcpServers["web-planner"] = {
         command: "node",
-        args: ["--import", "tsx/esm", $entry],
+        args: [$entry],
         env: { WEB_PLANNER_CONFIG: $cfg }
       }
     ' "$CLAUDE_JSON" > "$TMP" && mv "$TMP" "$CLAUDE_JSON"
@@ -170,7 +170,7 @@ if [ "$REG_MCP" = "yes" ]; then
 
   "web-planner": {
     "command": "node",
-    "args": ["--import", "tsx/esm", "${ROOT}/server/src/mcp.ts"],
+    "args": ["${ROOT}/server/dist/mcp.mjs"],
     "env": { "WEB_PLANNER_CONFIG": "${STORAGE_ROOT}/config.json" }
   }
 EOF

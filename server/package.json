@@ -6,7 +6,8 @@
   "main": "./src/mcp.ts",
   "scripts": {
     "build": "node ./build.mjs",
-    "start": "node --import tsx/esm src/mcp.ts"
+    "start": "node dist/mcp.mjs",
+    "dev": "node --import tsx/esm src/mcp.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

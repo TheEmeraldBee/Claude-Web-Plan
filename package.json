@@ -9,7 +9,7 @@
     "cli"
   ],
   "scripts": {
-    "build": "npm run build -ws --if-present",
+    "build": "npm --prefix server run build && npm --prefix cli run build",
     "dev": "node --import tsx/esm server/src/mcp.ts",
     "http": "node --import tsx/esm server/src/http-only.ts",
     "typecheck": "tsc -p server && tsc -p kit && tsc -p cli"
