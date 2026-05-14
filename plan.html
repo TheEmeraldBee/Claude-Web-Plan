@@ -1,0 +1,823 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Plan — Interactive web-planner MCP + planner agent</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --base: #1e1e2e;
+    --mantle: #181825;
+    --crust: #11111b;
+    --surface0: #313244;
+    --surface1: #45475a;
+    --surface2: #585b70;
+    --overlay0: #6c7086;
+    --overlay1: #7f849c;
+    --text: #cdd6f4;
+    --subtext1: #bac2de;
+    --subtext0: #a6adc8;
+    --mauve: #cba6f7;
+    --blue: #89b4fa;
+    --sapphire: #74c7ec;
+    --teal: #94e2d5;
+    --green: #a6e3a1;
+    --yellow: #f9e2af;
+    --peach: #fab387;
+    --red: #f38ba8;
+    --pink: #f5c2e7;
+    --flamingo: #f2cdcd;
+
+    --readable-width: 740px;
+    --wide-width: 980px;
+    --gutter: clamp(24px, 6vw, 96px);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--base);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.65;
+  }
+  .page {
+    max-width: var(--wide-width);
+    margin: 0 auto;
+    padding: 56px var(--gutter) 96px;
+  }
+  .col  { max-width: var(--readable-width); margin: 0 auto; }
+  .wide { max-width: var(--wide-width); margin: 0 auto; }
+
+  a { color: var(--blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre { font-family: "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
+  code { background: var(--surface0); color: var(--peach); padding: 2px 6px; border-radius: 4px; }
+  pre {
+    background: var(--mantle);
+    color: var(--text);
+    padding: 14px 16px;
+    border-radius: 8px;
+    overflow-x: auto;
+    border: 1px solid var(--surface0);
+    line-height: 1.55;
+  }
+  pre code { background: transparent; color: inherit; padding: 0; }
+
+  header.plan-header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; flex-wrap: wrap;
+    padding-bottom: 20px; margin-bottom: 28px;
+    border-bottom: 1px solid var(--surface0);
+  }
+  .plan-header h1 {
+    margin: 0; font-size: 1.95rem; letter-spacing: -0.01em;
+    color: var(--mauve);
+  }
+  .plan-meta { display: flex; align-items: center; gap: 10px; }
+  .badge {
+    display: inline-block;
+    background: var(--surface0); color: var(--subtext0);
+    padding: 4px 10px; border-radius: 999px;
+    font-size: 0.8rem; font-weight: 600;
+    border: 1px solid var(--surface1);
+  }
+  .badge.scope    { color: var(--blue);  border-color: rgba(137,180,250,0.3); }
+  .badge.locked   { color: var(--green); border-color: rgba(166,227,161,0.3); }
+  .badge.ready    { color: var(--mauve); border-color: rgba(203,166,247,0.3); }
+
+  section { margin: 40px 0; }
+  h2 { color: var(--blue); font-size: 1.3rem; margin: 0 0 14px; letter-spacing: -0.005em; }
+  h3 { color: var(--sapphire); font-size: 1.05rem; margin: 24px 0 8px; }
+
+  .callout {
+    background: linear-gradient(180deg, rgba(137,180,250,0.07), rgba(137,180,250,0.02));
+    border: 1px solid rgba(137,180,250,0.25);
+    border-left: 3px solid var(--blue);
+    padding: 14px 18px;
+    border-radius: 8px;
+  }
+  .callout.warn {
+    background: linear-gradient(180deg, rgba(249,226,175,0.07), rgba(249,226,175,0.02));
+    border-color: rgba(249,226,175,0.25);
+    border-left-color: var(--yellow);
+  }
+  .callout.info {
+    background: linear-gradient(180deg, rgba(148,226,213,0.05), rgba(148,226,213,0.02));
+    border-color: rgba(148,226,213,0.22);
+    border-left-color: var(--teal);
+  }
+  .callout.locked {
+    background: linear-gradient(180deg, rgba(166,227,161,0.05), rgba(166,227,161,0.02));
+    border-color: rgba(166,227,161,0.22);
+    border-left-color: var(--green);
+  }
+
+  .arch {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 14px;
+    margin: 16px 0;
+  }
+  .node {
+    background: var(--mantle);
+    border: 1px solid var(--surface0);
+    border-radius: 10px;
+    padding: 14px;
+  }
+  .node h4 { margin: 0 0 6px; font-size: 0.95rem; color: var(--peach); }
+  .node p { margin: 0; color: var(--subtext0); font-size: 0.88rem; line-height: 1.5; }
+
+  .seq {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0;
+    margin: 16px 0;
+    background: var(--crust);
+    border: 1px solid var(--surface0);
+    border-radius: 10px;
+    padding: 14px 10px 16px;
+  }
+  .seq .lane { text-align: center; padding: 0 6px; border-right: 1px dashed var(--surface0); }
+  .seq .lane:last-child { border-right: none; }
+  .seq .lane h5 {
+    margin: 0 0 8px; font-size: 0.8rem; color: var(--subtext0);
+    text-transform: uppercase; letter-spacing: 0.04em;
+    border-bottom: 1px solid var(--surface1); padding-bottom: 8px;
+  }
+  .seq .msg {
+    margin: 6px 0; font-size: 0.82rem;
+    font-family: ui-monospace, monospace; color: var(--text);
+    padding: 5px 8px; border-radius: 5px;
+    background: var(--mantle); border: 1px solid var(--surface0);
+    line-height: 1.4;
+  }
+  .seq .msg.block { color: var(--red);   border-color: rgba(243,139,168,0.35); }
+  .seq .msg.push  { color: var(--teal);  border-color: rgba(148,226,213,0.35); }
+  .seq .msg.resp  { color: var(--green); border-color: rgba(166,227,161,0.35); }
+  .seq .msg.user  { color: var(--pink);  border-color: rgba(245,194,231,0.35); }
+
+  .state-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 10px;
+    margin: 10px 0 4px;
+  }
+  .state-chip {
+    background: var(--mantle);
+    border: 1px solid var(--surface0);
+    border-radius: 8px;
+    padding: 10px 12px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .state-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; box-shadow: 0 0 0 3px var(--surface0); }
+  .state-dot.idle         { background: var(--overlay0); }
+  .state-dot.thinking     { background: var(--blue);   animation: pulse 1.6s ease-in-out infinite; }
+  .state-dot.asking       { background: var(--mauve);  animation: pulse 1.6s ease-in-out infinite; }
+  .state-dot.waiting      { background: var(--yellow); animation: pulse 1.6s ease-in-out infinite; }
+  .state-dot.implementing { background: var(--green);  animation: pulse 1.6s ease-in-out infinite; }
+  .state-dot.errored      { background: var(--red); }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 3px var(--surface0); }
+    50%      { box-shadow: 0 0 0 6px var(--surface0); }
+  }
+  .state-chip .name { font-family: ui-monospace, monospace; font-size: 0.82rem; color: var(--text); }
+  .state-chip .what { font-size: 0.78rem; color: var(--subtext0); margin-left: auto; }
+
+  .file-list { list-style: none; padding: 0; margin: 0; }
+  .file-list li {
+    display: grid;
+    grid-template-columns: minmax(240px, max-content) 1fr;
+    gap: 16px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--surface0);
+    align-items: baseline;
+  }
+  .file-list li:last-child { border-bottom: none; }
+  .file-list .desc { color: var(--subtext0); font-size: 0.9rem; }
+
+  .step-list { list-style: none; counter-reset: step; padding: 0; margin: 0; }
+  .step-list li.step {
+    counter-increment: step;
+    display: grid;
+    grid-template-columns: 32px 1fr;
+    gap: 12px;
+    padding: 12px 14px;
+    margin-bottom: 8px;
+    background: var(--mantle);
+    border: 1px solid var(--surface0);
+    border-radius: 8px;
+  }
+  .step-list li.step::before {
+    content: counter(step);
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px;
+    background: var(--surface0); color: var(--mauve);
+    font-family: ui-monospace, monospace; font-weight: 700; font-size: 0.85rem;
+    border-radius: 50%;
+  }
+  .step-list .step-title { color: var(--text); font-weight: 600; display: block; margin-bottom: 2px; }
+  .step-list .step-text  { color: var(--subtext0); font-size: 0.92rem; }
+
+  .block-mock { position: relative; margin: 14px 0; }
+  .block-body {
+    background: var(--mantle);
+    border: 1px solid var(--surface0);
+    border-radius: 10px;
+    padding: 14px 16px;
+    position: relative;
+  }
+  .block-body[data-has-comments="true"] {
+    border-color: rgba(249,226,175,0.5);
+    box-shadow: -3px 0 0 0 var(--yellow);
+  }
+  .block-tag {
+    position: absolute; top: 8px; right: 10px;
+    font-family: ui-monospace, monospace; font-size: 0.7rem; color: var(--overlay1);
+  }
+  .block-body h5 { margin: 0 0 6px; color: var(--peach); font-size: 0.95rem; }
+  .block-body p  { margin: 0; color: var(--subtext1); font-size: 0.92rem; }
+  .block-toolbar { margin-top: 10px; display: flex; gap: 6px; font-size: 0.78rem; }
+  .block-toolbar button {
+    background: var(--surface0);
+    color: var(--subtext1);
+    border: 1px solid var(--surface1);
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-size: 0.78rem;
+    cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .block-toolbar button:hover { background: var(--surface1); color: var(--text); }
+  .block-toolbar .count { color: var(--peach); font-family: ui-monospace, monospace; }
+  .heart { color: var(--red); }
+  .popover {
+    position: absolute;
+    top: 60%; right: -24px;
+    transform: translateX(100%);
+    width: 280px;
+    background: var(--crust);
+    border: 1px solid var(--surface1);
+    border-radius: 10px;
+    padding: 12px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+  }
+  .popover::before {
+    content: "";
+    position: absolute;
+    left: -7px; top: 18px;
+    width: 12px; height: 12px;
+    background: var(--crust);
+    border-left: 1px solid var(--surface1);
+    border-bottom: 1px solid var(--surface1);
+    transform: rotate(45deg);
+  }
+  .popover h6 { margin: 0 0 8px; color: var(--yellow); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  .comment {
+    background: var(--mantle);
+    border: 1px solid var(--surface0);
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin-bottom: 6px;
+    font-size: 0.84rem;
+  }
+  .comment .who  { color: var(--pink); font-weight: 600; font-size: 0.76rem; }
+  .comment .text { color: var(--subtext1); display: block; margin-top: 2px; }
+  .popover textarea {
+    width: 100%;
+    background: var(--mantle); color: var(--text);
+    border: 1px solid var(--surface0); border-radius: 6px;
+    padding: 7px 10px; font-size: 0.84rem; font-family: inherit; resize: vertical;
+  }
+  .popover .add-row { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
+  .popover .add-row button {
+    background: var(--mauve); color: var(--crust); border: none;
+    border-radius: 6px; padding: 5px 12px;
+    font-size: 0.78rem; font-weight: 700; cursor: pointer;
+  }
+  @media (max-width: 1100px) {
+    .popover { position: static; transform: none; width: auto; margin-top: 10px; }
+    .popover::before { display: none; }
+  }
+
+  table.tools { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  table.tools th, table.tools td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--surface0);
+    font-size: 0.9rem;
+    vertical-align: top;
+  }
+  table.tools th { color: var(--subtext0); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  table.tools td code { font-size: 0.85rem; }
+  .tag-block { color: var(--red);   font-family: ui-monospace, monospace; font-size: 0.72rem; }
+  .tag-fast  { color: var(--green); font-family: ui-monospace, monospace; font-size: 0.72rem; }
+  .tag-write { color: var(--peach); font-family: ui-monospace, monospace; font-size: 0.72rem; }
+
+  .kit-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    margin: 12px 0;
+  }
+  .kit {
+    background: var(--mantle);
+    border: 1px solid var(--surface0);
+    border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .kit code.name { color: var(--green); font-family: ui-monospace, monospace; font-size: 0.92rem; padding: 0; background: transparent; }
+  .kit p { margin: 4px 0 0; color: var(--subtext0); font-size: 0.84rem; }
+
+  @media (max-width: 720px) {
+    .arch, .seq { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body data-status="proposed">
+
+<div class="page">
+
+<header class="plan-header col">
+  <h1>Interactive web-planner: MCP + planner agent</h1>
+  <div class="plan-meta">
+    <span class="badge scope">scope: this project</span>
+    <span class="badge ready">decisions locked</span>
+  </div>
+</header>
+
+<!-- Summary -->
+<section class="col">
+  <h2>Summary</h2>
+  <div class="callout">
+    Build an <strong>MCP server</strong> + <strong>planner agent</strong> that own the whole planning experience. Plans are <em>Preact .plan.tsx files composed of annotatable blocks</em>, diagram-heavy via <strong>Mermaid</strong>. Claude never ends a turn — it blocks on <code>wait_for_message</code> after every response, behaving like a persistent chat partner. Users send messages from the browser chat or from the terminal CLI, drop a single short comment on any block, and click <strong>Send feedback</strong> to wake the planner for a revision. Once a plan is marked <code>implemented</code>, it's frozen — historical record only.
+  </div>
+</section>
+
+<!-- Locked-in choices -->
+<section class="col">
+  <h2>Locked-in choices</h2>
+  <div class="callout locked">
+    <ul style="margin:0 0 0 18px; padding:0;">
+      <li><strong>Runtime:</strong> Node + TypeScript</li>
+      <li><strong>Agent wiring:</strong> top-level mode via <code>/web-plan</code> slash command</li>
+      <li><strong>Framework:</strong> Preact + a small component kit; plans authored as <code>.plan.tsx</code></li>
+      <li><strong>Diagram tool:</strong> <strong>Mermaid</strong> (switched from Excalidraw — see "Why Mermaid" below)</li>
+      <li><strong>Block kinds:</strong> open-ended; per-project <code>components.tsx</code> + <code>components.css</code> for new kinds</li>
+      <li><strong>Browser transport:</strong> SSE for push, plain POST for everything else</li>
+      <li><strong>Comments:</strong> at most one short comment per block. No author, no likes, no replies. Replacing it overwrites; the popover never grows.</li>
+      <li><strong>Plan storage root:</strong> <code>~/.web-planner/</code> — same global root as the existing skill's directory pattern.</li>
+      <li><strong>Plan immutability:</strong> plans with status <code>implemented</code> are frozen. <code>proposed</code> and <code>approved</code> (in-progress / not-accepted) are editable. Nothing is ever removed.</li>
+      <li><strong>Wait timeout:</strong> <code>wait_for_message</code> never times out</li>
+      <li><strong>Host/port:</strong> <code>http://localhost:1248</code></li>
+      <li><strong>Layout:</strong> Obsidian-style readable column (~740px) inside a wider page (~980px)</li>
+      <li><strong>v1 component kit:</strong> 11 components — see "Component kit" section</li>
+      <li><strong>Installer prompts:</strong> 8 prompts — see "Interactive installer" section</li>
+      <li><strong>Version control:</strong> Jujutsu (<code>jj</code>). Commit at logical checkpoints during implementation. No pushing.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- Why Mermaid -->
+<section class="col">
+  <h2>Why Mermaid over Excalidraw</h2>
+  <div class="callout info">
+    Excalidraw's data model is hand-positioned shapes in pixel space — to author from a semantic description we'd have to build a graph-layout compiler (dagre/elk) that emits Excalidraw JSON. Excalidraw's real strength is interactive, hand-drawn editing, which is wasted on read-only plan renders. Mermaid is text-in / SVG-out: Claude writes five lines of fenced <code>sequenceDiagram</code> and gets a labeled, auto-laid-out diagram. It covers every diagram shape we care about (sequence, flowchart, state, ER, gantt, class, timeline, mindmap), has theme support, and ships an ESM build we can lazy-load only on plan pages that contain a diagram. We keep the option to embed a raw SVG block for the rare case Mermaid can't draw it.
+  </div>
+</section>
+
+<!-- Goals -->
+<section class="col">
+  <h2>Goals</h2>
+  <ul>
+    <li><strong>Persistent planner loop.</strong> Outer loop is <code>while true: msg = wait_for_message(); …</code>.</li>
+    <li><strong>Plans are .plan.tsx</strong>, server-compiled to HTML on read via esbuild's transformer + a Preact SSR pass.</li>
+    <li><strong>Diagram-first.</strong> Structural content prefers a <code>&lt;Mermaid&gt;</code> block over prose.</li>
+    <li><strong>Component kit + per-project extensions.</strong> Eleven built-in components; new kinds register in <code>~/.web-planner/projects/&lt;slug&gt;/components.tsx</code>.</li>
+    <li><strong>One comment per block.</strong> No author, no likes, no replies. Adding a comment to a block that already has one replaces it.</li>
+    <li><strong>Implemented plans are frozen.</strong> Editing tools refuse on status <code>implemented</code>; new comments are blocked too. Plans live forever — never removed.</li>
+    <li><strong>Obsidian-style reading width.</strong> Prose at ~740px; diagrams escape into a wider column.</li>
+    <li><strong>Live state surface.</strong> Pill in dashboard, <code>wp status</code> in CLI.</li>
+  </ul>
+</section>
+
+<!-- Architecture -->
+<section class="wide">
+  <h2 class="col" style="max-width:var(--readable-width); margin-left:auto; margin-right:auto;">Architecture</h2>
+
+  <div class="arch">
+    <div class="node">
+      <h4>Claude (planner agent)</h4>
+      <p>Triggered by <code>/web-plan</code>. Loops on <code>wait_for_message</code>. Calls <code>create_plan</code> / <code>update_block</code> / <code>ask_user</code>.</p>
+    </div>
+    <div class="node">
+      <h4>MCP + HTTP sidecar</h4>
+      <p>Stdio MCP. Owns plan files, comment store, pending blocking calls, live state. Sidecar at <code>http://localhost:1248</code>.</p>
+    </div>
+    <div class="node">
+      <h4>Browser UI &amp; CLI <code>wp</code></h4>
+      <p>Preact viewer with Mermaid blocks, popover comments, chat, state pill. CLI for terminal-side <code>send</code> / <code>status</code> / <code>open</code> / <code>feedback</code>.</p>
+    </div>
+  </div>
+
+  <div class="seq">
+    <div class="lane">
+      <h5>User</h5>
+      <div class="msg user">starts <code>/web-plan</code></div>
+      <div class="msg user">types in chat</div>
+      <div class="msg user">comments b-steps</div>
+      <div class="msg user">clicks "Send feedback"</div>
+    </div>
+    <div class="lane">
+      <h5>Claude</h5>
+      <div class="msg block">wait_for_message ⛔</div>
+      <div class="msg resp">create_plan(tsx)</div>
+      <div class="msg block">wait_for_message ⛔</div>
+      <div class="msg resp">update_block(b-steps, …)</div>
+      <div class="msg block">wait_for_message ⛔</div>
+    </div>
+    <div class="lane">
+      <h5>MCP / HTTP</h5>
+      <div class="msg push">state: waiting</div>
+      <div class="msg push">SSE: plan.created</div>
+      <div class="msg push">state: waiting</div>
+      <div class="msg push">SSE: block.updated</div>
+      <div class="msg push">state: waiting</div>
+    </div>
+    <div class="lane">
+      <h5>Browser UI</h5>
+      <div class="msg">chat + state pill</div>
+      <div class="msg">renders plan (Preact)</div>
+      <div class="msg">popover on b-steps</div>
+      <div class="msg user">POST /api/feedback</div>
+      <div class="msg">renders patch</div>
+    </div>
+  </div>
+</section>
+
+<!-- Blocking primitive -->
+<section class="col">
+  <h2>The blocking primitive</h2>
+  <pre><code>// shared
+async function awaitInput(kind, payload) {
+  const id = randomUUID();
+  state.setActivity({ kind, id, payload, since: Date.now() });
+  sse.broadcast({ type: kind + ":open", id, payload });
+  return new Promise((resolve) =&gt; {
+    state.pending.set(id, { resolve, kind });
+  });
+}
+
+// MCP tool: wait_for_message — no timeout
+async function wait_for_message() {
+  const msg = await awaitInput("message", {});
+  return { content: [{ type: "text", text: msg.text }] };
+}
+
+// MCP tool: ask_user
+async function ask_user({ questions, timeout_seconds = 1800 }) {
+  const answers = await awaitInput("ask_user", { questions, timeout_seconds });
+  return { content: [{ type: "text", text: formatAnswers(answers) }] };
+}
+
+// HTTP endpoints that unblock the planner
+POST /api/message            // browser chat or `wp send`
+POST /api/answer/:id         // ask_user response
+POST /api/feedback           // bundled comments + likes</code></pre>
+</section>
+
+<!-- Blocks -->
+<section class="col">
+  <h2>Plans = Preact blocks</h2>
+  <p>
+    A plan is a Preact module that default-exports a <code>&lt;Plan&gt;</code> built from <code>&lt;Block&gt;</code> children. The block id is stable across edits; the block kind is a free-form slug Claude picks. Built-in components live in <code>@web-planner/kit</code>; per-project extensions live in <code>~/.web-planner/projects/&lt;slug&gt;/components.tsx</code>.
+  </p>
+  <pre><code>// example plan source
+import { Plan, Block, Callout, StepList, FileList, Mermaid, Arch } from "@web-planner/kit";
+import { DbSchema } from "../../components"; // per-project extension
+
+export default () =&gt; (
+  &lt;Plan title="Add OAuth login" status="proposed"&gt;
+    &lt;Block id="b-summary" kind="summary"&gt;
+      &lt;Callout&gt;Add Google OAuth as the first login provider.&lt;/Callout&gt;
+    &lt;/Block&gt;
+
+    &lt;Block id="b-arch" kind="diagram.sequence"&gt;
+      &lt;Mermaid&gt;{`
+        sequenceDiagram
+          User-&gt;&gt;App: /login
+          App-&gt;&gt;Google: redirect
+          Google--&gt;&gt;App: code
+          App-&gt;&gt;Session: create
+      `}&lt;/Mermaid&gt;
+    &lt;/Block&gt;
+
+    &lt;Block id="b-files" kind="files"&gt;
+      &lt;FileList items={[
+        { path: "src/auth/oauth.ts", desc: "new — Google flow" },
+        { path: "db/migrations/0042_session.sql", desc: "schema bump" },
+      ]} /&gt;
+    &lt;/Block&gt;
+
+    &lt;Block id="b-schema" kind="db.schema"&gt;
+      &lt;DbSchema tables={[ /* … */ ]} /&gt;
+    &lt;/Block&gt;
+
+    &lt;Block id="b-steps" kind="steps"&gt;
+      &lt;StepList steps={[
+        { title: "Migration", text: "Add sessions table." },
+        { title: "OAuth client", text: "Wire passport-google-oauth20." },
+      ]} /&gt;
+    &lt;/Block&gt;
+  &lt;/Plan&gt;
+);</code></pre>
+  <div class="callout info">
+    Token wins compound: a 12-step plan that would be ~400 lines of HTML is ~50 lines of JSX. Auto-import lint catches typos at plan-write time. The <code>&lt;Block&gt;</code> wrapper handles the like + comment chrome for every block regardless of kind, so new kinds get full functionality for free.
+  </div>
+
+  <h3>Server-side validation on <code>create_plan</code> / <code>update_block</code></h3>
+  <ul>
+    <li>Parses with esbuild — syntax errors return a clear tool error.</li>
+    <li>Every <code>&lt;Block&gt;</code> must have a unique <code>id</code>.</li>
+    <li><code>create_plan</code> / <code>update_block</code> / <code>append_block</code> that target a plan with status <code>implemented</code> are rejected with <code>plan_frozen</code>.</li>
+    <li>A write that drops a block id with an existing comment is rejected — the agent must address or carry the comment forward.</li>
+    <li>Component imports outside <code>@web-planner/kit</code> + the project's <code>components.tsx</code> are rejected.</li>
+  </ul>
+</section>
+
+<!-- Component kit -->
+<section class="col">
+  <h2>v1 component kit</h2>
+  <p>Shipped as <code>@web-planner/kit</code>. Used by every plan. All accept a <code>className</code> escape hatch.</p>
+  <div class="kit-grid">
+    <div class="kit"><code class="name">&lt;Callout&gt;</code><p>info / warn / danger highlight</p></div>
+    <div class="kit"><code class="name">&lt;StepList&gt;</code><p>numbered, hover-tinted steps</p></div>
+    <div class="kit"><code class="name">&lt;FileList&gt;</code><p>monospace path + role description</p></div>
+    <div class="kit"><code class="name">&lt;DecisionPanel&gt;</code><p>radio / multi / freeform questions; submit → <code>ask_user</code></p></div>
+    <div class="kit"><code class="name">&lt;Mermaid&gt;</code><p>fenced mermaid → SVG; lazy-loaded</p></div>
+    <div class="kit"><code class="name">&lt;Arch&gt;</code><p>3-up node grid for architecture sketches</p></div>
+    <div class="kit"><code class="name">&lt;Sequence&gt;</code><p>CSS lane diagram (lighter than Mermaid for short flows)</p></div>
+    <div class="kit"><code class="name">&lt;Tree&gt;</code><p>file/dependency tree</p></div>
+    <div class="kit"><code class="name">&lt;Timeline&gt;</code><p>horizontal time bars</p></div>
+    <div class="kit"><code class="name">&lt;StateChips&gt;</code><p>live status pills (waiting / asking / …)</p></div>
+    <div class="kit"><code class="name">&lt;CodeBlock&gt;</code><p>syntax-highlighted code (shiki)</p></div>
+  </div>
+
+  <h3>Per-project extensions</h3>
+  <pre><code>~/.web-planner/projects/&lt;slug&gt;/
+├── components.tsx     // Preact components Claude defines on first use
+├── components.css     // their styles
+└── plans/
+    ├── 2026-05-13-1430-add-oauth.plan.tsx
+    └── …</code></pre>
+  <p>
+    When Claude needs a kind not in the kit (say <code>db.schema</code>), it appends a component to <code>components.tsx</code>, then imports it in the plan. Future plans in that project can reuse it. The viewer auto-resolves the import; no build step beyond the in-memory esbuild transform.
+  </p>
+</section>
+
+<!-- Comments -->
+<section class="col">
+  <h2>Comments — one per block, nothing else</h2>
+  <p>
+    Each block has a tiny toolbar: <code>+ comment</code> if empty, <code>edit comment</code> if a comment exists. Clicking opens a popover anchored to the block with a single textarea. Submitting writes the comment; submitting again overwrites it. No author, no timestamp shown, no reactions, no replies, no resolve, no delete. The point is a quick "this needs attention" stickynote, not a discussion thread.
+  </p>
+
+  <div class="wide block-mock">
+    <div class="block-body" data-has-comments="true">
+      <span class="block-tag">b-steps · kind=steps</span>
+      <h5>Steps</h5>
+      <p>1. Scaffold. 2. Storage. 3. HTTP sidecar. 4. <code>wait_for_message</code>. 5. <code>ask_user</code>…</p>
+      <div class="block-toolbar">
+        <button>edit comment</button>
+      </div>
+    </div>
+    <div class="popover">
+      <h6>comment on b-steps</h6>
+      <div class="comment"><span class="text">step 5 should run before step 4 — ask_user testable before the loop</span></div>
+      <textarea rows="2" placeholder="overwrite the comment…"></textarea>
+      <div class="add-row"><button>save</button></div>
+    </div>
+  </div>
+
+  <h3>Storage</h3>
+  <pre><code>~/.web-planner/projects/&lt;slug&gt;/plans/&lt;ts&gt;-&lt;slug&gt;.plan.tsx       // plan source
+~/.web-planner/projects/&lt;slug&gt;/plans/&lt;ts&gt;-&lt;slug&gt;.notes.json    // one comment per block, or empty
+
+// notes.json — sparse map of blockId → comment string
+{
+  "b-steps":   "step 5 should run before step 4 — ask_user testable before the loop",
+  "b-arch":    "can we use stdio for the CLI too?"
+}</code></pre>
+
+  <h3>"Send feedback" wakes the planner</h3>
+  <p>
+    Dashboard footer button collects every block that has a comment, formats them, POSTs to <code>/api/feedback</code>, resolves <code>wait_for_message</code>:
+  </p>
+  <pre><code>Feedback on plan "Add OAuth login":
+
+[b-steps]  step 5 should run before step 4 — ask_user testable before the loop
+[b-arch]   can we use stdio for the CLI too?
+
+Please revise.</code></pre>
+  <p>The planner addresses what it can with <code>update_block</code> / <code>append_block</code>. Comments are never deleted — only overwritten by the user. Once a plan is <code>implemented</code>, the comment field on every block is read-only.</p>
+</section>
+
+<!-- State -->
+<section class="col">
+  <h2>Live Claude state</h2>
+  <div class="state-row">
+    <div class="state-chip"><span class="state-dot idle"></span><span class="name">idle</span><span class="what">no agent</span></div>
+    <div class="state-chip"><span class="state-dot thinking"></span><span class="name">thinking</span><span class="what">between calls</span></div>
+    <div class="state-chip"><span class="state-dot asking"></span><span class="name">asking</span><span class="what"><code>ask_user</code></span></div>
+    <div class="state-chip"><span class="state-dot waiting"></span><span class="name">waiting</span><span class="what"><code>wait_for_message</code></span></div>
+    <div class="state-chip"><span class="state-dot implementing"></span><span class="name">implementing</span><span class="what">edits running</span></div>
+    <div class="state-chip"><span class="state-dot errored"></span><span class="name">errored</span><span class="what">tool threw</span></div>
+  </div>
+  <p>Broadcast over SSE; mirrored to <code>GET /api/state</code> for the CLI.</p>
+</section>
+
+<!-- MCP tools -->
+<section class="col">
+  <h2>MCP tools</h2>
+  <table class="tools">
+    <thead><tr><th>Tool</th><th>Purpose</th><th>Returns</th></tr></thead>
+    <tbody>
+      <tr><td><code>wait_for_message</code> <span class="tag-block">BLOCKING</span></td>
+          <td>Block until a message arrives (browser chat, <code>wp send</code>, or "Send feedback"). No timeout.</td>
+          <td><code>{text, source, payload?}</code></td></tr>
+      <tr><td><code>ask_user</code> <span class="tag-block">BLOCKING</span></td>
+          <td>Push structured questions; modal in UI; times out cleanly.</td>
+          <td><code>{answers}</code> | <code>{timed_out:true}</code></td></tr>
+      <tr><td><code>create_plan</code> <span class="tag-write">WRITE</span></td>
+          <td>Submit a full <code>.plan.tsx</code> source. Server compiles + validates structure + block ids.</td>
+          <td><code>{plan_id, url}</code></td></tr>
+      <tr><td><code>update_block</code> <span class="tag-write">WRITE</span></td>
+          <td>Replace one <code>&lt;Block id="…"&gt;</code> by id. Operates on the JSX source via a CST patcher.</td>
+          <td><code>{plan_id, block_id}</code></td></tr>
+      <tr><td><code>append_block</code> <span class="tag-write">WRITE</span></td>
+          <td>Insert a new <code>&lt;Block&gt;</code> at a position.</td>
+          <td><code>{plan_id, block_id}</code></td></tr>
+      <tr><td><code>register_component</code> <span class="tag-write">WRITE</span></td>
+          <td>Append a Preact component to the project's <code>components.tsx</code>. Validates it exports a named function.</td>
+          <td><code>{name}</code></td></tr>
+      <tr><td><code>set_plan_status</code></td>
+          <td><code>proposed | approved | implemented | abandoned</code>.</td>
+          <td><code>{plan_id, status}</code></td></tr>
+      <tr><td><code>set_state</code></td>
+          <td>Override implicit activity state.</td>
+          <td><code>{ok}</code></td></tr>
+      <tr><td><code>list_plans</code> / <code>get_plan</code> <span class="tag-fast">FAST</span></td>
+          <td>Read-only views.</td>
+          <td><code>{…}</code></td></tr>
+      <tr><td><code>open_in_browser</code></td>
+          <td>Run the open-command against a URL.</td>
+          <td><code>{ok}</code></td></tr>
+    </tbody>
+  </table>
+  <p style="font-size:0.88rem;color:var(--subtext0);margin-top:8px;">No <code>resolve_comment</code>, no <code>delete_comment</code>, no <code>like_*</code>. Comments overwrite in place via the UI's <code>POST /api/comment</code>. Write tools (<code>create_plan</code>, <code>update_block</code>, <code>append_block</code>, <code>register_component</code>) return <code>plan_frozen</code> if the plan's status is <code>implemented</code>.</p>
+</section>
+
+<!-- Planner -->
+<section class="col">
+  <h2>The planner agent</h2>
+  <pre><code>---
+name: web-planner
+description: Interactive planning partner. Triggered by /web-plan. Owns plan
+  documents authored as Preact .plan.tsx, asks clarifying questions in the
+  browser, and revises in response to inline block comments. Never voluntarily
+  ends — always blocks on wait_for_message.
+tools: mcp__web-planner__*, Read, Glob, Grep
+---
+
+OUTER LOOP, forever:
+  1. mcp__web-planner__wait_for_message
+  2. Interpret:
+     • FIRST message → planning brief. Read the codebase, then call
+       create_plan with the full .plan.tsx source.
+     • "Feedback on plan …" bundle → patch with update_block /
+       append_block. Comments cannot be resolved or deleted.
+     • Other → answer or clarify.
+  3. If a real decision is needed, call ask_user (or render a
+     &lt;DecisionPanel&gt; in a block).
+  4. Goto 1.
+
+AUTHORING RULES:
+  • Plans are Preact .plan.tsx. Use components from @web-planner/kit.
+  • If you need a new block kind, call register_component to add it to
+    the project's components.tsx, then import it in the plan.
+  • Block ids are stable. Reuse them across revisions. Never drop an id
+    that has a comment without addressing it first.
+  • Plans with status "implemented" are frozen. Do not attempt to edit
+    them — the server will reject. If the user asks for changes to an
+    implemented plan, propose a NEW plan that references it.
+  • Prefer &lt;Mermaid&gt; / &lt;Sequence&gt; / &lt;Arch&gt; / &lt;Tree&gt; / &lt;Timeline&gt; over
+    prose for structural content.
+  • Theme value lives in ~/.web-planner/config.json. Read it on the first
+    create_plan of a session. If you don't recognize the theme name,
+    ask_user for the color intent before authoring.</code></pre>
+</section>
+
+<!-- CLI -->
+<section class="col">
+  <h2>The <code>wp</code> CLI</h2>
+  <pre><code>wp send "use redis instead of in-memory"    # POST /api/message
+wp status                                   # GET  /api/state
+wp open                                     # opens dashboard via open-command
+wp plans                                    # list plans for cwd's project
+wp feedback                                 # dump all comments + likes, then send</code></pre>
+</section>
+
+<!-- Installer -->
+<section class="col">
+  <h2>Interactive installer</h2>
+  <p><code>install.sh</code> walks through 8 prompts and writes the result to <code>~/.web-planner/config.json</code>.</p>
+  <ol>
+    <li><strong>Theme</strong> — free-form string. Stored verbatim; the planner reads it on first run and either implements it directly or asks follow-ups via <code>ask_user</code>.</li>
+    <li><strong>Browser open command</strong> — e.g. <code>zen-browser --blank-window {url}</code>. <code>{url}</code> is substituted. Empty = print only.</li>
+    <li><strong>Port</strong> — default <code>1248</code>.</li>
+    <li><strong>Storage root</strong> — default <code>~/.web-planner/</code>.</li>
+    <li><strong>Install <code>wp</code> on PATH?</strong> — yes/no; if yes, asks the install dir (default <code>~/.local/bin</code>).</li>
+    <li><strong>Auto-launch browser on plan create?</strong> — yes / only on <code>ask_user</code> / never.</li>
+    <li><strong>Register MCP in <code>~/.claude.json</code>?</strong> — yes/no.</li>
+    <li><strong>Register the <code>/web-plan</code> slash command?</strong> — yes/no.</li>
+  </ol>
+</section>
+
+<!-- Files -->
+<section class="col">
+  <h2>Files affected</h2>
+  <ul class="file-list">
+    <li><code>package.json</code><span class="desc">new — Node deps: <code>@modelcontextprotocol/sdk</code>, <code>zod</code>, <code>esbuild</code>, <code>preact</code>, <code>preact-render-to-string</code>, <code>mermaid</code>, <code>shiki</code>, <code>node-html-parser</code></span></li>
+    <li><code>tsconfig.json</code><span class="desc">new — strict, ESM, JSX = <code>preact</code></span></li>
+    <li><code>src/mcp.ts</code><span class="desc">new — MCP stdio entry; tool registration</span></li>
+    <li><code>src/http.ts</code><span class="desc">new — sidecar on <code>localhost:1248</code>; routes for static UI, SSE, message, answer, feedback, comment (POST/GET only — no delete), state</span></li>
+    <li><code>src/state.ts</code><span class="desc">new — pending-call map + activity state + SSE subscribers</span></li>
+    <li><code>src/storage.ts</code><span class="desc">new — plan.tsx + notes.json; atomic temp+rename</span></li>
+    <li><code>src/compile.ts</code><span class="desc">new — esbuild-transform plan.tsx → JS module; Preact SSR → HTML; cached by mtime</span></li>
+    <li><code>src/blocks.ts</code><span class="desc">new — JSX CST patcher: replace one <code>&lt;Block id="…"&gt;</code> subtree by id</span></li>
+    <li><code>src/tools/*.ts</code><span class="desc">new — one file per MCP tool</span></li>
+    <li><code>kit/src/index.tsx</code><span class="desc">new — <code>@web-planner/kit</code> exports (Block, Plan, Callout, StepList, FileList, DecisionPanel, Mermaid, Arch, Sequence, Tree, Timeline, StateChips, CodeBlock)</span></li>
+    <li><code>kit/src/*.tsx</code><span class="desc">new — one file per component</span></li>
+    <li><code>kit/src/styles.css</code><span class="desc">new — Catppuccin Mocha + Obsidian-width column</span></li>
+    <li><code>ui/index.html</code><span class="desc">new — dashboard shell</span></li>
+    <li><code>ui/plan.html</code><span class="desc">new — plan viewer shell; mounts comment popovers + chat + state pill on top of the rendered Preact plan</span></li>
+    <li><code>ui/app.tsx</code><span class="desc">new — viewer entry: SSE client, hydration, popover wiring, send-feedback assembler</span></li>
+    <li><code>ui/vendor/mermaid.min.mjs</code><span class="desc">new — vendored Mermaid ESM (lazy-loaded only on plans that contain <code>&lt;Mermaid&gt;</code>)</span></li>
+    <li><code>cli/wp.ts</code><span class="desc">new — bundled to single JS file via esbuild; subcommands send/status/open/plans/feedback</span></li>
+    <li><code>agent/web-planner.md</code><span class="desc">new — planner agent definition</span></li>
+    <li><code>install.sh</code><span class="desc">new — interactive installer; writes <code>~/.web-planner/config.json</code>; registers MCP + slash command; installs CLI</span></li>
+    <li><code>README.md</code><span class="desc">new — install + usage</span></li>
+  </ul>
+</section>
+
+<!-- Steps -->
+<section class="wide">
+  <h2 class="col" style="max-width:var(--readable-width); margin-left:auto; margin-right:auto;">Implementation steps</h2>
+  <ol class="step-list">
+    <li class="step"><div><span class="step-title">Scaffold the monorepo</span><span class="step-text">Node + TS; two workspaces: <code>kit/</code> (the component library) and root <code>src/</code> (server). Install MCP SDK, zod, esbuild, preact, preact-render-to-string, mermaid, shiki, node-html-parser.</span></div></li>
+    <li class="step"><div><span class="step-title">Build the kit</span><span class="step-text">Implement the 11 components. <code>&lt;Block&gt;</code> wrapper renders block chrome (♥, + comment, popover anchor) around any child. Catppuccin Mocha styles; Obsidian column system.</span></div></li>
+    <li class="step"><div><span class="step-title">Compile pipeline</span><span class="step-text"><code>compile.ts</code>: transform <code>.plan.tsx</code> with esbuild (in-memory), resolve <code>@web-planner/kit</code> + per-project <code>components.tsx</code>, SSR with preact-render-to-string, cache by mtime.</span></div></li>
+    <li class="step"><div><span class="step-title">State + storage</span><span class="step-text">Pending-call map, activity state, SSE subscriber set. <code>storage.ts</code> for atomic plan + <code>notes.json</code> writes. <code>blocks.ts</code> as a JSX CST patcher (replace one <code>&lt;Block id="…"&gt;</code> subtree).</span></div></li>
+    <li class="step"><div><span class="step-title">HTTP sidecar on :1248</span><span class="step-text">Routes: <code>/</code>, <code>/plans/:id</code> (returns SSR HTML + hydrate bundle), <code>/api/stream</code>, <code>/api/message</code>, <code>/api/answer/:id</code>, <code>/api/feedback</code>, <code>/api/comment</code> (POST overwrites), <code>/api/state</code>, <code>/static/*</code>. localhost-only. Comment POSTs are blocked when the target plan is <code>implemented</code>.</span></div></li>
+    <li class="step"><div><span class="step-title">Viewer hydration + comment popovers</span><span class="step-text"><code>ui/app.tsx</code>: SSE client, mount popover beside any block on demand, single-textarea overwrite-only comment editor, chat box, state pill, send-feedback bar. Disable the editor entirely when the plan's status is <code>implemented</code>.</span></div></li>
+    <li class="step"><div><span class="step-title">Lazy-load Mermaid</span><span class="step-text">Detect <code>&lt;Mermaid&gt;</code> in the SSR pass; emit a small client init script only when a diagram is present. Theme tokens mapped to Catppuccin colors.</span></div></li>
+    <li class="step"><div><span class="step-title"><code>ask_user</code></span><span class="step-text">Smaller blocking tool first. Modal in UI; timeout path; POST answers back.</span></div></li>
+    <li class="step"><div><span class="step-title"><code>wait_for_message</code></span><span class="step-text">No timeout. Three sources resolve it: chat, <code>wp send</code>, feedback bundle.</span></div></li>
+    <li class="step"><div><span class="step-title">Plan-author tools</span><span class="step-text"><code>create_plan</code>, <code>update_block</code>, <code>append_block</code>, <code>register_component</code>, <code>set_plan_status</code>, <code>set_state</code>.</span></div></li>
+    <li class="step"><div><span class="step-title"><code>wp</code> CLI</span><span class="step-text">esbuild-bundled single file. <code>send/status/open/plans/feedback</code>. Reads port from <code>~/.web-planner/config.json</code>.</span></div></li>
+    <li class="step"><div><span class="step-title">Planner agent definition</span><span class="step-text"><code>agent/web-planner.md</code> with the system prompt above. Tool allowlist.</span></div></li>
+    <li class="step"><div><span class="step-title">Interactive installer</span><span class="step-text"><code>install.sh</code> walks the 8 prompts, writes <code>~/.web-planner/config.json</code>, registers MCP, installs CLI, sets up <code>/web-plan</code>.</span></div></li>
+    <li class="step"><div><span class="step-title">End-to-end test</span><span class="step-text">Fresh session → <code>/web-plan</code> → planner blocks → user types brief → plan renders with a Mermaid sequence + StepList + FileList → user ♥s b-arch and comments on b-steps → Send feedback → planner revises and blocks again.</span></div></li>
+  </ol>
+</section>
+
+<!-- Risks -->
+<section class="col">
+  <h2>Risks &amp; open questions</h2>
+  <div class="callout warn">
+    <ul style="margin: 0 0 0 18px; padding: 0;">
+      <li><strong>The agent never finishes.</strong> If Claude Code enforces a per-tool timeout, <code>wait_for_message</code> dies and the loop breaks. Mitigation: server-side keepalive notifications + auto-reissue.</li>
+      <li><strong>Build step on every plan read.</strong> Compile-on-read with esbuild adds ~30-80ms per plan. Cache aggressively by mtime; pre-warm on plan create.</li>
+      <li><strong>JSX CST patching.</strong> <code>update_block</code> needs to splice JSX safely. Use a real parser (esbuild's, or Babel) — not regex. Reject patches where the block id isn't found.</li>
+      <li><strong>Mermaid bundle.</strong> ~700KB ESM. Lazy-load only when a plan has a <code>&lt;Mermaid&gt;</code> block.</li>
+      <li><strong>Per-project components blast radius.</strong> A broken <code>components.tsx</code> breaks every plan in that project. <code>register_component</code> should validate by compiling before saving.</li>
+      <li><strong>Block-id stability.</strong> Server rejects writes that drop ids with an attached comment. Planner prompt enforces reuse.</li>
+      <li><strong>Frozen-plan UX.</strong> A user trying to edit an implemented plan needs a clear in-UI signal (greyed toolbars, status pill colored differently) — not just a silent server reject.</li>
+      <li><strong>Port collision.</strong> Installer asks for an alternate if <code>1248</code> is taken; CLI reads from config.</li>
+      <li><strong>Concurrent sessions.</strong> v1 doc'd as "one session at a time"; v2 scopes by session id.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- Next -->
+<section class="col">
+  <h2>Next</h2>
+  <div class="callout">
+    All decisions locked. The plan is ready for scaffolding. Reply <code>go</code> (or "implement it") and I'll start at step 1.
+  </div>
+</section>
+
+</div>
+
+</body>
+</html>
