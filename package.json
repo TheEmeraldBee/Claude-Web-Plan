@@ -1,0 +1,22 @@
+{
+  "name": "web-planner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "kit",
+    "server",
+    "cli"
+  ],
+  "scripts": {
+    "build": "npm run build -ws --if-present",
+    "dev": "node --import tsx/esm server/src/mcp.ts",
+    "http": "node --import tsx/esm server/src/http-only.ts",
+    "typecheck": "tsc -p server && tsc -p kit && tsc -p cli"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "tsx": "^4.19.0",
+    "@types/node": "^22.0.0"
+  }
+}
