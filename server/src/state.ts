@@ -43,7 +43,16 @@ class State {
   addSubscriber(send: Subscriber["send"]): string {
     const id = randomUUID();
     this.subscribers.set(id, { id, send });
+    // Current state
     send({ type: "state", value: this.activity });
+    // Replay open ask_user so a fresh tab (or a reload after the original
+    // broadcast was missed) re-renders the modal. The agent is still blocked
+    // on the same pending Promise — answering on this client will resolve it.
+    for (const [pendingId, p] of this.pending) {
+      if (p.kind === "ask_user") {
+        send({ type: "ask_user:open", id: pendingId, payload: { questions: p.questions } });
+      }
+    }
     return id;
   }
   removeSubscriber(id: string) { this.subscribers.delete(id); }
