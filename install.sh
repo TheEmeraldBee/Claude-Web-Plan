@@ -35,10 +35,13 @@ fi
 
 ask() {
   local prompt="$1" default="$2" var=""
+  # Prompts go to stderr so command substitution `X=$(ask ...)` captures only
+  # the answer — not the prompt text. (Captured-prompt bug was the reason
+  # "aborted" appeared after running through with defaults.)
   if [ -n "$default" ]; then
-    printf "%s [%s]: " "$prompt" "$default"
+    printf "%s [%s]: " "$prompt" "$default" >&2
   else
-    printf "%s: " "$prompt"
+    printf "%s: " "$prompt" >&2
   fi
   read -r var || var=""
   if [ -z "$var" ]; then echo "$default"; else echo "$var"; fi
@@ -46,7 +49,7 @@ ask() {
 
 ask_yn() {
   local prompt="$1" default="$2" var=""
-  printf "%s [%s]: " "$prompt" "$default"
+  printf "%s [%s]: " "$prompt" "$default" >&2
   read -r var || var=""
   if [ -z "$var" ]; then var="$default"; fi
   case "$var" in
