@@ -6,6 +6,16 @@ Plans are Preact `.plan.tsx` documents composed of annotatable blocks. The agent
 
 ## Install
 
+One-liner — clones to `~/.local/share/web-planner` and runs the interactive installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TheEmeraldBee/Claude-Web-Plan/main/bootstrap.sh | bash
+```
+
+Override location with `WEB_PLANNER_HOME=<path>` or branch with `WEB_PLANNER_BRANCH=<name>` before piping.
+
+Already cloned? Just run the installer directly:
+
 ```bash
 ./install.sh
 ```
@@ -21,7 +31,7 @@ The installer prompts for:
 7. **Register MCP in `~/.claude.json`** — yes/no.
 8. **Register `/web-plan` slash command** — yes/no.
 
-Requires Node ≥ 20, `npm`, and `jq` (only for auto-registering the MCP — without jq, the installer prints the JSON to paste).
+Requires `git`, Node ≥ 20, `npm`, and `jq` (only for auto-registering the MCP — without jq, the installer prints the JSON to paste).
 
 ## Use
 
