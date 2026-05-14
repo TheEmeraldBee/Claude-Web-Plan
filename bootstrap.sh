@@ -39,4 +39,13 @@ fi
 
 cd "${INSTALL_ROOT}"
 bold "running installer"
-exec bash ./install.sh
+
+# The installer is interactive. When invoked via `curl ... | bash`, our stdin
+# is the consumed pipe — `read` would hit EOF and abort under `set -e`. Pull
+# input from the controlling terminal instead.
+if [ -r /dev/tty ]; then
+  exec bash ./install.sh < /dev/tty
+else
+  warn "no controlling tty — run ./install.sh manually from ${INSTALL_ROOT}"
+  exit 0
+fi

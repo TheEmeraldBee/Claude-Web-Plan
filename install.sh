@@ -15,25 +15,39 @@ COMMANDS_DIR="${HOME_DIR}/.claude/commands"
 
 bold()  { printf "\033[1m%s\033[0m\n" "$*"; }
 muted() { printf "\033[2m%s\033[0m\n" "$*"; }
-warn()  { printf "\033[33m%s\033[0m\n" "$*"; }
+warn()  { printf "\033[33m%s\033[0m\n" "$*" >&2; }
 ok()    { printf "\033[32m%s\033[0m\n" "$*"; }
 die()   { printf "\033[31merror: %s\033[0m\n" "$*" >&2; exit 1; }
 
+# The installer is interactive. Refuse to proceed without a TTY so users get
+# a clear message instead of a cryptic abort. (bootstrap.sh redirects stdin
+# from /dev/tty when invoked via `curl | bash`.)
+if [ ! -t 0 ]; then
+  # Test whether /dev/tty is actually open-able for this process. Doing this
+  # in a subshell first keeps bash from printing the "No such device" complaint
+  # against the outer shell.
+  if ( exec </dev/tty ) 2>/dev/null; then
+    exec </dev/tty
+  else
+    die "no controlling terminal — run install.sh directly from a shell"
+  fi
+fi
+
 ask() {
-  local prompt="$1" default="$2" var
+  local prompt="$1" default="$2" var=""
   if [ -n "$default" ]; then
     printf "%s [%s]: " "$prompt" "$default"
   else
     printf "%s: " "$prompt"
   fi
-  read -r var
+  read -r var || var=""
   if [ -z "$var" ]; then echo "$default"; else echo "$var"; fi
 }
 
 ask_yn() {
-  local prompt="$1" default="$2" var
+  local prompt="$1" default="$2" var=""
   printf "%s [%s]: " "$prompt" "$default"
-  read -r var
+  read -r var || var=""
   if [ -z "$var" ]; then var="$default"; fi
   case "$var" in
     y|Y|yes|YES) echo "yes" ;;
