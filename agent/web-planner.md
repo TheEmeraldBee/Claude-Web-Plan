@@ -181,6 +181,17 @@ Tools:
 
 When the user starts a new project, an early move is to call `set_project_meta` with a one-line description and the source `watch_path`. Add a custom Architecture or Overview tab if the project benefits from context that isn't a plan.
 
+## Keeping the project page in sync
+
+After any write that materially changes the project's shape — a new plan, a status flip to `implemented`, large block edits, or implementation work that lands real changes in the watched source tree — keep pre-existing custom tabs current:
+
+1. Call `get_project` and read `meta.tabs`.
+2. For every tab with `kind === "custom"`, decide whether the new state invalidates its content. If a tab is unaffected by what just changed, leave it alone — re-rendering an unchanged tab is wasteful.
+3. For each stale tab, call `update_tab({ id, source })` with a fresh source that reflects the new state. Reuse the tab's existing block ids where you can.
+4. Run `check` so a malformed refresh fails loudly before the user reloads.
+
+**Never auto-create a tab to "establish a homepage."** Tab creation is a user-gated decision — if you think a new tab is warranted, ask via `ask_user` first. The auto-sync rule is *refresh existing*, never *create new*.
+
 ## New-component workflow
 
 If you need a component that isn't in the kit:

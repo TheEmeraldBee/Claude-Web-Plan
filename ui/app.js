@@ -41,6 +41,8 @@
     if (msg.type === "state") setStateUi(msg.value);
     if (msg.type === "ask_user:open") openAskModal(msg.id, msg.payload);
     if (msg.type === "comment:set" && PLAN && msg.planId === PLAN.id) reflectComment(msg.blockId);
+    if (msg.type === "comment:cleared" && PLAN && msg.planId === PLAN.id) clearCommentUi(msg.blockId);
+    if (msg.type === "plan.status" && PLAN && msg.planId === PLAN.id) reflectStatus(msg.status);
     if (msg.type === "plan.created" || msg.type === "plan.updated" || msg.type === "block.updated") {
       // crude reload on the plan page when affected
       if (PLAN && msg.planId === PLAN.id) setTimeout(() => location.reload(), 200);
@@ -94,6 +96,30 @@
     if (btn) btn.textContent = "edit comment";
   }
 
+  function clearCommentUi(blockId) {
+    if (PLAN && PLAN.notes) delete PLAN.notes[blockId];
+    const block = document.querySelector('[data-block-id="' + cssEscape(blockId) + '"]');
+    if (!block) return;
+    block.removeAttribute("data-has-comment");
+    const btn = block.querySelector(".comment-btn");
+    if (btn) btn.textContent = "+ comment";
+    const pop = document.querySelector('.popover[data-comment-block="' + cssEscape(blockId) + '"]');
+    if (pop) pop.remove();
+  }
+
+  function reflectStatus(status) {
+    if (!PLAN) return;
+    PLAN.status = status;
+    const badge = document.querySelector(".plan .plan-header .badge.status-proposed, .plan .plan-header .badge.status-approved, .plan .plan-header .badge.status-implemented, .plan .plan-header .badge.status-abandoned");
+    if (badge) {
+      badge.className = "badge status-" + status;
+      badge.textContent = status;
+    }
+    if (status === "implemented") {
+      document.querySelectorAll(".send-feedback-bar, .start-impl-bar").forEach((b) => b.remove());
+    }
+  }
+
   function cssEscape(s) {
     return (window.CSS && CSS.escape) ? CSS.escape(s) : s.replace(/[^a-zA-Z0-9_-]/g, (c) => "\\" + c);
   }
@@ -114,6 +140,17 @@
 
     mountFeedbackBar();
     mountDeleteButton();
+    mountBackButton();
+  }
+
+  function mountBackButton() {
+    const header = document.querySelector(".plan .plan-header .plan-meta");
+    if (!header) return;
+    const back = document.createElement("a");
+    back.className = "plan-back-btn";
+    back.href = "/projects/" + encodeURIComponent(PLAN.project);
+    back.textContent = "← back to project";
+    header.insertBefore(back, header.firstChild);
   }
 
   function mountDeleteButton() {
@@ -158,12 +195,14 @@
     const existing = (PLAN.notes || {})[blockId] || "";
     const pop = document.createElement("div");
     pop.className = "popover";
+    pop.setAttribute("data-comment-block", blockId);
     pop.innerHTML = `
       <h6>comment on ${escapeHtml(blockId)}</h6>
       ${existing ? `<div class="existing">${escapeHtml(existing)}</div>` : ""}
       <textarea rows="2" placeholder="${existing ? "overwrite the comment…" : "add a comment…"}"></textarea>
       <div class="row">
         <button type="button" class="cancel">cancel</button>
+        ${existing ? `<button type="button" class="delete">delete</button>` : ""}
         <button type="button" class="save">save</button>
       </div>
     `;
@@ -175,6 +214,26 @@
     const ta = pop.querySelector("textarea");
     ta && ta.focus();
     pop.querySelector(".cancel").addEventListener("click", closePopover);
+    const delBtn = pop.querySelector(".delete");
+    if (delBtn) {
+      delBtn.addEventListener("click", async () => {
+        if (PLAN.status === "implemented") { alert("plan is frozen — comments are read-only"); return; }
+        delBtn.disabled = true;
+        const r = await fetch("/api/comment", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ project: PLAN.project, planId: PLAN.id, blockId, text: "" }),
+        });
+        if (r.ok) {
+          clearCommentUi(blockId);
+          closePopover();
+        } else {
+          const e = await r.json().catch(() => ({}));
+          alert("delete failed: " + (e.error || r.status));
+          delBtn.disabled = false;
+        }
+      });
+    }
     pop.querySelector(".save").addEventListener("click", async () => {
       const text = ta.value.trim();
       if (!text) { closePopover(); return; }
@@ -213,25 +272,60 @@
     if (PLAN.status === "implemented") return;
     const bar = document.createElement("div");
     bar.className = "send-feedback-bar";
-    bar.innerHTML = `<button type="button">Send feedback to planner</button>`;
+    bar.innerHTML = `
+      <button type="button" class="send-feedback">Send feedback to planner</button>
+      <button type="button" class="start-impl">Start Implementation</button>
+      <span class="bar-hint" hidden></span>
+    `;
     document.querySelector(".plan").appendChild(bar);
-    bar.querySelector("button").addEventListener("click", async () => {
-      const btn = bar.querySelector("button");
-      btn.disabled = true;
+    const fbBtn = bar.querySelector(".send-feedback");
+    const implBtn = bar.querySelector(".start-impl");
+    const hint = bar.querySelector(".bar-hint");
+    function showHint(text) {
+      hint.textContent = text;
+      hint.hidden = false;
+      setTimeout(() => { hint.hidden = true; }, 4000);
+    }
+    fbBtn.addEventListener("click", async () => {
+      fbBtn.disabled = true;
       try {
         const r = await fetch("/api/feedback", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ project: PLAN.project, planId: PLAN.id }),
         });
+        const body = await r.json().catch(() => ({}));
         if (!r.ok) {
-          const e = await r.json().catch(() => ({}));
-          alert(e.error === "no_comments" ? "add a comment first" :
-                e.error === "agent_not_waiting" ? "the planner isn't currently waiting" :
-                "send failed: " + (e.error || r.status));
+          alert(body.error === "no_comments" ? "add a comment first" :
+                "send failed: " + (body.error || r.status));
+        } else if (body.queued) {
+          showHint("queued — planner is busy; will deliver next");
+        } else {
+          showHint("sent");
         }
       } finally {
-        btn.disabled = false;
+        fbBtn.disabled = false;
+      }
+    });
+    implBtn.addEventListener("click", async () => {
+      if (!confirm("Start implementation now? The planner will begin editing files.")) return;
+      implBtn.disabled = true;
+      try {
+        const r = await fetch("/api/start-implementation", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ project: PLAN.project, planId: PLAN.id }),
+        });
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          alert("start failed: " + (body.error || r.status));
+        } else if (body.queued) {
+          showHint("approved + queued — planner will start when free");
+        } else {
+          showHint("approved + sent");
+        }
+      } finally {
+        implBtn.disabled = false;
       }
     });
   }

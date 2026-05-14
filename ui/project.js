@@ -92,6 +92,61 @@
     }
   }
 
+  // ---------- Kanban drag-and-drop ----------
+  let dragId = null;
+  let dragFromStatus = null;
+  document.addEventListener("dragstart", (ev) => {
+    const card = ev.target instanceof HTMLElement ? ev.target.closest(".plan-card") : null;
+    if (!card) return;
+    dragId = card.getAttribute("data-plan-id");
+    dragFromStatus = card.getAttribute("data-plan-status");
+    card.classList.add("dragging");
+    if (ev.dataTransfer) {
+      ev.dataTransfer.effectAllowed = "move";
+      ev.dataTransfer.setData("text/plain", dragId || "");
+    }
+  });
+  document.addEventListener("dragend", (ev) => {
+    const card = ev.target instanceof HTMLElement ? ev.target.closest(".plan-card") : null;
+    if (card) card.classList.remove("dragging");
+    document.querySelectorAll(".kanban-col.drop-target").forEach((c) => c.classList.remove("drop-target"));
+    dragId = null;
+    dragFromStatus = null;
+  });
+  document.addEventListener("dragover", (ev) => {
+    const zone = ev.target instanceof HTMLElement ? ev.target.closest("[data-drop-zone]") : null;
+    if (!zone || !dragId) return;
+    ev.preventDefault();
+    if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
+    const col = zone.closest(".kanban-col");
+    document.querySelectorAll(".kanban-col.drop-target").forEach((c) => { if (c !== col) c.classList.remove("drop-target"); });
+    if (col) col.classList.add("drop-target");
+  });
+  document.addEventListener("drop", async (ev) => {
+    const zone = ev.target instanceof HTMLElement ? ev.target.closest("[data-drop-zone]") : null;
+    if (!zone || !dragId) return;
+    ev.preventDefault();
+    const status = zone.getAttribute("data-drop-zone");
+    const planId = dragId;
+    const fromStatus = dragFromStatus;
+    document.querySelectorAll(".kanban-col.drop-target").forEach((c) => c.classList.remove("drop-target"));
+    if (!status || status === fromStatus) return;
+    try {
+      const r = await fetch("/api/plan/status", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ project, planId, status }),
+      });
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}));
+        alert("status change failed: " + (e.error || r.status));
+      }
+      // SSE plan.status will trigger refetchActiveTab
+    } catch (e) {
+      alert("status change failed: " + e);
+    }
+  });
+
   document.addEventListener("click", async (ev) => {
     const target = ev.target;
     if (!(target instanceof HTMLElement)) return;

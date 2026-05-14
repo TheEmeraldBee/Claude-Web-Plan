@@ -202,6 +202,16 @@ export class Storage {
     return rec;
   }
 
+  clearComment(project: string, planId: string, blockId: string): boolean {
+    const rec = this.readPlan(project, planId);
+    if (!rec) return false;
+    if (!(blockId in rec.notes)) return false;
+    delete rec.notes[blockId];
+    const base = this.basePath(project, planId);
+    atomicWrite(base + NOTES_SUFFIX, JSON.stringify(rec.notes, null, 2));
+    return true;
+  }
+
   deletePlan(project: string, planId: string): boolean {
     const base = this.basePath(project, planId);
     let removed = false;

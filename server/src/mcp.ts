@@ -175,6 +175,11 @@ function defaultProject(arg?: string): string {
 async function callToolImpl(name: string, args: unknown): Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }> {
   switch (name) {
     case "wait_for_message": {
+      const queued = state.shiftBacklog();
+      if (queued) {
+        state.setActivity({ kind: "thinking" });
+        return ok(queued.text);
+      }
       state.setActivity({ kind: "waiting" });
       const text = await new Promise<string>((resolve) => {
         state.registerPending({ kind: "message", resolve });
@@ -250,6 +255,9 @@ async function callToolImpl(name: string, args: unknown): Promise<{ content: { t
       storage.updateSource(project, a.plan_id, next);
       invalidate(storage.basePath(project, a.plan_id) + ".plan.tsx");
       state.broadcast({ type: "block.updated", planId: a.plan_id, project, blockId: a.block_id });
+      if (storage.clearComment(project, a.plan_id, a.block_id)) {
+        state.broadcast({ type: "comment:cleared", project, planId: a.plan_id, blockId: a.block_id });
+      }
       return ok({ plan_id: a.plan_id, block_id: a.block_id });
     }
 
@@ -272,6 +280,9 @@ async function callToolImpl(name: string, args: unknown): Promise<{ content: { t
       invalidate(storage.basePath(project, a.plan_id) + ".plan.tsx");
       for (const blockId of appendedIds) {
         state.broadcast({ type: "block.appended", planId: a.plan_id, project, blockId });
+        if (storage.clearComment(project, a.plan_id, blockId)) {
+          state.broadcast({ type: "comment:cleared", project, planId: a.plan_id, blockId });
+        }
       }
       return ok({ plan_id: a.plan_id, block_ids: appendedIds });
     }

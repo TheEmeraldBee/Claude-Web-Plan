@@ -107,19 +107,12 @@ async function handleMessage(req: IncomingMessage, res: ServerResponse) {
   try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
   const text = (parsed.text ?? "").trim();
   if (!text) return sendJson(res, 400, { error: "empty_text" });
-
-  // resolve any pending wait_for_message
-  for (const [id, p] of state.pending) {
-    if (p.kind === "message") {
-      state.pending.delete(id);
-      const source = parsed.source ?? "chat";
-      p.resolve(`[from ${source}]\n${text}`);
-      state.broadcast({ type: "message:delivered", source });
-      return sendJson(res, 200, { ok: true });
-    }
-  }
-  // no waiting agent — store as backlog? For v1 just reject.
-  sendJson(res, 409, { error: "agent_not_waiting", hint: "the planner is not currently blocked on wait_for_message" });
+  const source = parsed.source ?? "chat";
+  const payload = `[from ${source}]\n${text}`;
+  const r = state.enqueueOrDeliver({ text: payload, kind: "chat", meta: { source } });
+  if (r.delivered) state.broadcast({ type: "message:delivered", source });
+  else state.broadcast({ type: "message:queued", source, position: r.position });
+  sendJson(res, 200, { ok: true, queued: r.queued, position: r.position });
 }
 
 async function handleAnswer(req: IncomingMessage, res: ServerResponse, askId: string) {
@@ -140,12 +133,33 @@ async function handleComment(req: IncomingMessage, res: ServerResponse) {
   const { project, planId, blockId, text } = parsed;
   if (!project || !planId || !blockId || typeof text !== "string") return sendJson(res, 400, { error: "missing_fields" });
   try {
-    storage.setComment(project, planId, blockId, text);
-    state.broadcast({ type: "comment:set", project, planId, blockId });
+    if (text === "") {
+      storage.clearComment(project, planId, blockId);
+      state.broadcast({ type: "comment:cleared", project, planId, blockId });
+    } else {
+      storage.setComment(project, planId, blockId, text);
+      state.broadcast({ type: "comment:set", project, planId, blockId });
+    }
     sendJson(res, 200, { ok: true });
   } catch (e) {
     sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) });
   }
+}
+
+async function handlePlanStatus(req: IncomingMessage, res: ServerResponse) {
+  const body = await readBody(req);
+  let parsed: { project?: string; planId?: string; status?: string };
+  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
+  const { project, planId, status } = parsed;
+  if (!project || !planId || !status) return sendJson(res, 400, { error: "missing_fields" });
+  if (status !== "proposed" && status !== "approved" && status !== "implemented" && status !== "abandoned") {
+    return sendJson(res, 400, { error: "invalid_status" });
+  }
+  const rec = storage.readPlan(project, planId);
+  if (!rec) return sendJson(res, 404, { error: "plan_not_found" });
+  const next = storage.setStatus(project, planId, status as "proposed" | "approved" | "implemented" | "abandoned");
+  state.broadcast({ type: "plan.status", planId, project, status: next.meta.status });
+  sendJson(res, 200, { ok: true, status: next.meta.status });
 }
 
 async function handleDeletePlan(req: IncomingMessage, res: ServerResponse) {
@@ -180,16 +194,28 @@ async function handleFeedback(req: IncomingMessage, res: ServerResponse) {
   }
   lines.push("", "Please revise.");
   const text = lines.join("\n");
-  // resolve a pending wait_for_message
-  for (const [id, p] of state.pending) {
-    if (p.kind === "message") {
-      state.pending.delete(id);
-      p.resolve(text);
-      state.broadcast({ type: "feedback:sent", planId: parsed.planId });
-      return sendJson(res, 200, { ok: true });
-    }
-  }
-  sendJson(res, 409, { error: "agent_not_waiting" });
+  const r = state.enqueueOrDeliver({ text, kind: "feedback", meta: { planId: parsed.planId, project: parsed.project } });
+  state.broadcast({ type: "feedback:sent", planId: parsed.planId, queued: r.queued, position: r.position });
+  sendJson(res, 200, { ok: true, queued: r.queued, position: r.position });
+}
+
+async function handleStartImplementation(req: IncomingMessage, res: ServerResponse) {
+  const body = await readBody(req);
+  let parsed: { project?: string; planId?: string };
+  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
+  if (!parsed.project || !parsed.planId) return sendJson(res, 400, { error: "missing_fields" });
+  const rec = storage.readPlan(parsed.project, parsed.planId);
+  if (!rec) return sendJson(res, 404, { error: "plan_not_found" });
+  if (rec.meta.status === "implemented") return sendJson(res, 409, { error: "plan_already_implemented" });
+  const next = storage.setStatus(parsed.project, parsed.planId, "approved");
+  state.broadcast({ type: "plan.status", planId: parsed.planId, project: parsed.project, status: next.meta.status });
+  const text = [
+    `Start implementation of plan "${rec.meta.title}" (id: ${parsed.planId}).`,
+    `No comments — proceed.`,
+  ].join("\n");
+  const r = state.enqueueOrDeliver({ text, kind: "implementation", meta: { planId: parsed.planId, project: parsed.project } });
+  state.broadcast({ type: "implementation:started", planId: parsed.planId, queued: r.queued, position: r.position });
+  sendJson(res, 200, { ok: true, queued: r.queued, position: r.position });
 }
 
 async function handlePlansList(_req: IncomingMessage, res: ServerResponse) {
@@ -268,18 +294,24 @@ function renderTabBar(active: string, tabs: { id: string; title: string; kind: s
 async function renderBuiltinTab(project: string, tabId: string): Promise<string> {
   if (tabId === "plans") {
     const plans = storage.listPlans(project);
-    if (plans.length === 0) return `<p class="muted">No plans yet.</p>`;
-    const group = (status: string) => plans.filter((p) => p.status === status);
-    const section = (label: string, status: string) => {
-      const items = group(status);
-      if (items.length === 0) return "";
-      return `<section class="plan-section">
-        <h3>${escapeHtml(label)} <span class="muted">(${items.length})</span></h3>
-        <div class="plan-list">
-          ${items.map((p) => `<div class="plan-row-wrap">
-            <a class="plan-row" href="/plans/${encodeURIComponent(project)}/${encodeURIComponent(p.id)}">
+    const COLUMNS: { status: "proposed" | "approved" | "implemented" | "abandoned"; label: string }[] = [
+      { status: "proposed", label: "Proposed" },
+      { status: "approved", label: "Approved" },
+      { status: "implemented", label: "Implemented" },
+      { status: "abandoned", label: "Abandoned" },
+    ];
+    const empty = plans.length === 0 ? `<p class="muted">No plans yet. Drag here once the planner creates one.</p>` : "";
+    const column = (label: string, status: string) => {
+      const items = plans.filter((p) => p.status === status);
+      return `<section class="kanban-col" data-status="${escapeHtml(status)}">
+        <header class="kanban-col-head">
+          <span class="badge status-${escapeHtml(status)}">${escapeHtml(label)}</span>
+          <span class="muted">${items.length}</span>
+        </header>
+        <div class="kanban-col-body" data-drop-zone="${escapeHtml(status)}">
+          ${items.map((p) => `<div class="plan-card" draggable="true" data-plan-id="${escapeHtml(p.id)}" data-plan-status="${escapeHtml(p.status)}">
+            <a class="plan-card-link" href="/plans/${encodeURIComponent(project)}/${encodeURIComponent(p.id)}">
               <span class="plan-title">${escapeHtml(p.title)}</span>
-              <span class="badge status-${escapeHtml(p.status)}">${escapeHtml(p.status)}</span>
               <span class="when">${escapeHtml(p.modified.slice(0,16))}</span>
             </a>
             <button type="button" class="plan-row-delete" data-plan-id="${escapeHtml(p.id)}" data-plan-title="${escapeHtml(p.title)}" data-plan-status="${escapeHtml(p.status)}" title="delete plan">×</button>
@@ -287,7 +319,7 @@ async function renderBuiltinTab(project: string, tabId: string): Promise<string>
         </div>
       </section>`;
     };
-    return [section("Proposed", "proposed"), section("Approved", "approved"), section("Implemented", "implemented"), section("Abandoned", "abandoned")].join("");
+    return `${empty}<div class="kanban">${COLUMNS.map((c) => column(c.label, c.status)).join("")}</div>`;
   }
   if (tabId === "layout") {
     const meta = storage.readProject(project);
@@ -397,7 +429,9 @@ async function router(req: IncomingMessage, res: ServerResponse) {
 
     if (m === "POST" && url.pathname === "/api/message") return handleMessage(req, res);
     if (m === "POST" && url.pathname === "/api/feedback") return handleFeedback(req, res);
+    if (m === "POST" && url.pathname === "/api/start-implementation") return handleStartImplementation(req, res);
     if (m === "POST" && url.pathname === "/api/comment") return handleComment(req, res);
+    if (m === "POST" && url.pathname === "/api/plan/status") return handlePlanStatus(req, res);
     if (m === "POST" && url.pathname === "/api/plan/delete") return handleDeletePlan(req, res);
     const ansMatch = url.pathname.match(/^\/api\/answer\/([\w-]+)$/);
     if (m === "POST" && ansMatch) return handleAnswer(req, res, ansMatch[1] as string);

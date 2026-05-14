@@ -30,10 +30,34 @@ export interface ActivityState {
   detail?: unknown;
 }
 
+export type BacklogKind = "chat" | "feedback" | "implementation";
+export interface BacklogEntry {
+  text: string;
+  kind: BacklogKind;
+  meta?: Record<string, unknown>;
+}
+
 class State {
   pending = new Map<string, Pending>();
   subscribers = new Map<string, Subscriber>();
   activity: ActivityState = { kind: "idle", since: Date.now() };
+  backlog: BacklogEntry[] = [];
+
+  enqueueOrDeliver(entry: BacklogEntry): { delivered: boolean; queued: boolean; position?: number } {
+    for (const [id, p] of this.pending) {
+      if (p.kind === "message") {
+        this.pending.delete(id);
+        p.resolve(entry.text);
+        return { delivered: true, queued: false };
+      }
+    }
+    this.backlog.push(entry);
+    return { delivered: false, queued: true, position: this.backlog.length };
+  }
+
+  shiftBacklog(): BacklogEntry | undefined {
+    return this.backlog.shift();
+  }
 
   setActivity(next: Partial<ActivityState> & { kind: ActivityKind }) {
     this.activity = { since: Date.now(), ...next };
