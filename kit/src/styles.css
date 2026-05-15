@@ -127,9 +127,10 @@ pre code { background: transparent; color: inherit; padding: 0; }
 .block-body { color: var(--text); }
 .block-toolbar {
   margin-top: 10px;
-  display: flex;
+  display: none;
   gap: 6px;
 }
+.plan .block-toolbar { display: flex; }
 .block-toolbar button {
   background: var(--surface0);
   color: var(--subtext1);
@@ -537,8 +538,17 @@ pre.mermaid svg { max-width: 100%; height: auto; }
   font-size: 0.82rem;
   font-family: ui-monospace, monospace;
   color: var(--text);
+  cursor: pointer;
 }
+.state-pill:hover { border-color: var(--mauve); }
 .state-pill .state-dot { box-shadow: 0 0 0 2px var(--mantle); }
+.state-pill-caret {
+  font-size: 0.72rem;
+  color: var(--subtext0);
+  transition: transform 0.15s ease;
+}
+.chrome.collapsed .state-pill-caret { transform: rotate(180deg); }
+.chrome.collapsed .chat-box { display: none; }
 .chat-box {
   width: 360px;
   background: var(--mantle);

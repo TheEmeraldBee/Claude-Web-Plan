@@ -9,7 +9,10 @@
     const chrome = document.createElement("div");
     chrome.className = "chrome";
     chrome.innerHTML = `
-      <div class="state-pill"><span class="state-dot state-dot-idle"></span><span class="state-name">connecting…</span></div>
+      <button type="button" class="state-pill" aria-expanded="true" title="toggle message box">
+        <span class="state-dot state-dot-idle"></span><span class="state-name">connecting…</span>
+        <span class="state-pill-caret" aria-hidden="true">▾</span>
+      </button>
       <div class="chat-box">
         <textarea placeholder="Message the planner…"></textarea>
         <div class="row">
@@ -22,10 +25,22 @@
     return chrome;
   }
   const chrome = mountStatePill();
+  const pillBtn = chrome.querySelector(".state-pill");
   const pillDot = chrome.querySelector(".state-pill .state-dot");
   const pillName = chrome.querySelector(".state-pill .state-name");
   const chatArea = chrome.querySelector(".chat-box textarea");
   const chatBtn = chrome.querySelector(".chat-box button");
+
+  const NARROW = 760;
+  function setCollapsed(collapsed) {
+    chrome.classList.toggle("collapsed", collapsed);
+    pillBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  }
+  setCollapsed(window.innerWidth < NARROW);
+  pillBtn.addEventListener("click", () => {
+    setCollapsed(!chrome.classList.contains("collapsed"));
+    if (!chrome.classList.contains("collapsed")) chatArea.focus();
+  });
 
   function setStateUi(value) {
     const kind = (value && value.kind) || "idle";
