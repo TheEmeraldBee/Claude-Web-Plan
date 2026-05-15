@@ -131,6 +131,15 @@
     const fromStatus = dragFromStatus;
     document.querySelectorAll(".kanban-col.drop-target").forEach((c) => c.classList.remove("drop-target"));
     if (!status || status === fromStatus) return;
+    // Optimistic move so the user sees the change immediately.
+    const card = document.querySelector(`.plan-card[data-plan-id="${cssEscape(planId)}"]`);
+    if (card) {
+      card.setAttribute("data-plan-status", status);
+      zone.appendChild(card);
+      const delBtn = card.querySelector(".plan-row-delete");
+      if (delBtn) delBtn.setAttribute("data-plan-status", status);
+      updateColumnCounts();
+    }
     try {
       const r = await fetch("/api/plan/status", {
         method: "POST",
@@ -140,12 +149,29 @@
       if (!r.ok) {
         const e = await r.json().catch(() => ({}));
         alert("status change failed: " + (e.error || r.status));
+        // Roll back by refetching from server.
+        refetchActiveTab();
+        return;
       }
-      // SSE plan.status will trigger refetchActiveTab
+      // Refetch to sync any other modifications and authoritative order.
+      refetchActiveTab();
     } catch (e) {
       alert("status change failed: " + e);
+      refetchActiveTab();
     }
   });
+
+  function cssEscape(s) {
+    return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/[^a-zA-Z0-9_-]/g, (c) => "\\" + c);
+  }
+
+  function updateColumnCounts() {
+    document.querySelectorAll(".kanban-col").forEach((col) => {
+      const body = col.querySelector(".kanban-col-body");
+      const head = col.querySelector(".kanban-col-head .muted");
+      if (body && head) head.textContent = String(body.querySelectorAll(".plan-card").length);
+    });
+  }
 
   document.addEventListener("click", async (ev) => {
     const target = ev.target;
