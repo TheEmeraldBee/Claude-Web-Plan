@@ -2,7 +2,7 @@ import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { extname, join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig } from "./config.js";
+import { loadConfig, projectSlugFromCwd } from "./config.js";
 import { state } from "./state.js";
 import { Storage } from "./storage.js";
 import { compilePlanFile, invalidate } from "./compile.js";
@@ -303,7 +303,7 @@ async function handleDashboard(_req: IncomingMessage, res: ServerResponse) {
 
 function renderTabBar(active: string, tabs: { id: string; title: string; kind: string }[]): string {
   return `<nav class="tab-bar">
-    ${tabs.map((t) => `<a class="tab ${t.id === active ? "active" : ""}" href="?tab=${encodeURIComponent(t.id)}" data-tab-id="${escapeHtml(t.id)}">${escapeHtml(t.title)}</a>`).join("")}
+    ${tabs.map((t) => `<a class="tab ${t.id === active ? "active" : ""}" href="?tab=${encodeURIComponent(t.id)}" data-tab-id="${escapeHtml(t.id)}" data-tab-kind="${escapeHtml(t.kind)}">${escapeHtml(t.title)}</a>`).join("")}
   </nav>`;
 }
 
@@ -357,7 +357,8 @@ async function renderCustomTab(project: string, tabId: string): Promise<string> 
   const path = storage.tabPath(project, tabId);
   if (!existsSync(path)) return `<p class="muted">tab source missing</p>`;
   const compiled = await compilePlanFile(path);
-  return compiled.html;
+  const notes = storage.readTabNotes(project, tabId);
+  return decorateWithNotes(compiled.html, notes);
 }
 
 async function handleProjectPage(req: IncomingMessage, res: ServerResponse, project: string) {
@@ -392,8 +393,9 @@ async function handleProjectPage(req: IncomingMessage, res: ServerResponse, proj
     ${renderTabBar(tab.id, meta.tabs)}
     <div class="tab-panel" data-tab-panel>${tabBody}</div>
   </main>`;
+  const tabMeta = tab.kind === "custom" ? `<script>window.__TAB__ = ${JSON.stringify({ project, tabId: tab.id })};</script>` : "";
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-  res.end(renderShell(`${meta.name || project} — web-planner`, body, hasMermaid, undefined, `<script type="module" src="/ui/project.js"></script>`, project));
+  res.end(renderShell(`${meta.name || project} — web-planner`, body, hasMermaid, undefined, `${tabMeta}<script type="module" src="/ui/project.js"></script>`, project));
 }
 
 function renderBoardTab(project: string, boardId: string): string {
@@ -416,7 +418,13 @@ function renderBoardTab(project: string, boardId: string): string {
       <button type="button" class="card-col-add" data-board-id="${escapeHtml(boardId)}" data-status="${escapeHtml(status)}" data-project="${escapeHtml(project)}">+ Add card</button>
     </div>`;
   }).join("");
-  return `<div class="card-board" data-board-id="${escapeHtml(boardId)}" data-project="${escapeHtml(project)}">${cols}</div>`;
+  return `<div class="card-board" data-board-id="${escapeHtml(boardId)}" data-project="${escapeHtml(project)}">
+    <header class="card-board-header">
+      <span class="card-board-title">${escapeHtml(board.title)}</span>
+      <button type="button" class="card-board-edit-btn" data-board-id="${escapeHtml(boardId)}" data-project="${escapeHtml(project)}" title="Edit columns">⚙ Edit columns</button>
+    </header>
+    ${cols}
+  </div>`;
 }
 
 async function handleProjectTabFragment(req: IncomingMessage, res: ServerResponse, project: string, tabId: string) {
@@ -519,6 +527,71 @@ async function handleBoardDeleteCard(req: IncomingMessage, res: ServerResponse) 
   } catch (e) { sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) }); }
 }
 
+async function handleTabComment(req: IncomingMessage, res: ServerResponse) {
+  const body = await readBody(req);
+  let parsed: { project?: string; tabId?: string; blockId?: string; text?: string };
+  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
+  const { project, tabId, blockId, text } = parsed;
+  if (!project || !tabId || !blockId || typeof text !== "string") return sendJson(res, 400, { error: "missing_fields" });
+  try {
+    storage.setTabComment(project, tabId, blockId, text);
+    const type = text === "" ? "tab:comment:cleared" : "tab:comment:set";
+    state.broadcast({ type, project, tabId, blockId });
+    sendJson(res, 200, { ok: true });
+  } catch (e) {
+    sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+async function handleBoardCreate(req: IncomingMessage, res: ServerResponse) {
+  const body = await readBody(req);
+  let parsed: { project?: string; title?: string; id?: string; statuses?: string[] };
+  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
+  const { title, statuses, id: rawId } = parsed;
+  if (!title || !statuses || !Array.isArray(statuses) || statuses.length === 0) {
+    return sendJson(res, 400, { error: "missing_fields" });
+  }
+  const project = parsed.project || projectSlugFromCwd();
+  const id = rawId || slugify(title);
+  try {
+    const board = storage.createCardBoard(project, id, title, statuses);
+    state.broadcast({ type: "project.updated", project });
+    sendJson(res, 200, { ok: true, board_id: board.id, title: board.title, statuses: board.statuses });
+  } catch (e) {
+    sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+async function handleBoardUpdateStatuses(req: IncomingMessage, res: ServerResponse) {
+  const body = await readBody(req);
+  let parsed: { project?: string; boardId?: string; statuses?: string[] };
+  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
+  const { boardId, statuses } = parsed;
+  if (!boardId || !statuses || !Array.isArray(statuses) || statuses.length === 0) {
+    return sendJson(res, 400, { error: "missing_fields" });
+  }
+  const project = parsed.project || projectSlugFromCwd();
+  try {
+    const board = storage.updateBoardStatuses(project, boardId, statuses);
+    state.broadcast({ type: "board:changed", project, boardId });
+    sendJson(res, 200, { ok: true, statuses: board.statuses });
+  } catch (e) {
+    sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+async function handleCreateTab(req: IncomingMessage, res: ServerResponse) {
+  const body = await readBody(req);
+  let parsed: { project?: string; title?: string; purpose?: string };
+  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
+  const { title, purpose } = parsed;
+  if (!title || !purpose) return sendJson(res, 400, { error: "missing_fields" });
+  const project = parsed.project || projectSlugFromCwd();
+  const text = `Create a new tab titled "${title}": ${purpose}`;
+  const r = state.enqueueOrDeliver({ text, kind: "chat", meta: { source: "new-tab-modal", project } });
+  sendJson(res, 200, { ok: true, queued: r.queued, position: r.position });
+}
+
 async function router(req: IncomingMessage, res: ServerResponse) {
   // Localhost-only.
   const remote = req.socket.remoteAddress ?? "";
@@ -551,9 +624,13 @@ async function router(req: IncomingMessage, res: ServerResponse) {
     if (m === "POST" && url.pathname === "/api/plan/delete") return handleDeletePlan(req, res);
     if (m === "POST" && url.pathname === "/api/generate-block") return handleGenerateBlock(req, res);
     if (m === "POST" && url.pathname === "/api/create-plan-stub") return handleCreatePlanStub(req, res);
+    if (m === "POST" && url.pathname === "/api/board/create") return handleBoardCreate(req, res);
+    if (m === "POST" && url.pathname === "/api/board/update-statuses") return handleBoardUpdateStatuses(req, res);
     if (m === "POST" && url.pathname === "/api/board/create-card") return handleBoardCreateCard(req, res);
     if (m === "POST" && url.pathname === "/api/board/update-card") return handleBoardUpdateCard(req, res);
     if (m === "POST" && url.pathname === "/api/board/delete-card") return handleBoardDeleteCard(req, res);
+    if (m === "POST" && url.pathname === "/api/tab-comment") return handleTabComment(req, res);
+    if (m === "POST" && url.pathname === "/api/create-tab") return handleCreateTab(req, res);
     const ansMatch = url.pathname.match(/^\/api\/answer\/([\w-]+)$/);
     if (m === "POST" && ansMatch) return handleAnswer(req, res, ansMatch[1] as string);
 

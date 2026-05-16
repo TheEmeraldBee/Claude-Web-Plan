@@ -4,7 +4,7 @@ export function DecisionPanel({ questions }: DecisionPanelProps) {
   return (
     <div class="qpanel" data-decision-panel>
       {questions.map((q, qi) => (
-        <div class="question" data-q-kind={q.kind} key={qi}>
+        <div class="question" data-q={String(qi)} data-q-kind={q.kind} key={qi}>
           <div class="q-text">{q.text}</div>
           {q.help ? <div class="q-help">{q.help}</div> : null}
           {q.kind === "freeform" ? (

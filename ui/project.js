@@ -20,6 +20,9 @@
       try {
         const r = await fetch(`/projects/${encodeURIComponent(project)}/tab/${encodeURIComponent(id)}`);
         panel.innerHTML = await r.text();
+        const tabKind = t.getAttribute("data-tab-kind") || "";
+        if (tabKind === "custom") window.__TAB__ = { project, tabId: id };
+        else delete window.__TAB__;
         if (id === "layout") loadLayout();
         postRenderInit(id);
       } catch (e) {
@@ -273,6 +276,12 @@
       const target = ev.target instanceof HTMLElement ? ev.target : null;
       if (!target) return;
 
+      const editBtn = target.closest(".card-board-edit-btn");
+      if (editBtn) {
+        openEditColumnsPopover(boardId, proj);
+        return;
+      }
+
       const addBtn = target.closest(".card-col-add");
       if (addBtn) {
         const status = addBtn.getAttribute("data-status");
@@ -308,6 +317,90 @@
     });
   }
 
+  function openEditColumnsPopover(boardId, proj) {
+    document.querySelectorAll(".popover").forEach((p) => p.remove());
+    const boardEl = document.querySelector(`[data-board-id="${CSS.escape(boardId)}"]`);
+    const currentStatuses = [...(boardEl?.querySelectorAll(".card-col") || [])].map((c) => c.getAttribute("data-status")).filter(Boolean);
+
+    const pop = document.createElement("div");
+    pop.className = "popover";
+    pop.style.cssText = "position:fixed;top:20%;left:50%;transform:translateX(-50%);width:380px;z-index:60;";
+
+    const colRowStyle = "display:flex;gap:6px;align-items:center;";
+    const colBtnStyle = "background:var(--surface0);border:1px solid var(--surface1);color:var(--subtext0);border-radius:4px;padding:2px 7px;cursor:pointer;font-family:inherit;font-size:0.82rem;";
+
+    function buildRows(statuses) {
+      return statuses.map((s, i) => `
+        <div class="col-row" style="${colRowStyle}">
+          <input type="text" class="col-name" value="${escapeHtml(s)}"
+            style="flex:1;padding:5px 8px;background:var(--mantle);border:1px solid var(--surface0);border-radius:4px;color:var(--text);font-size:0.9rem;font-family:inherit;" />
+          <button type="button" class="col-up" data-i="${i}" title="Move up" style="${colBtnStyle}" ${i === 0 ? "disabled" : ""}>↑</button>
+          <button type="button" class="col-down" data-i="${i}" title="Move down" style="${colBtnStyle}" ${i === statuses.length - 1 ? "disabled" : ""}>↓</button>
+          <button type="button" class="col-del" data-i="${i}" title="Remove" style="${colBtnStyle}">×</button>
+        </div>`).join("");
+    }
+
+    pop.innerHTML = `
+      <h6>Edit columns</h6>
+      <div class="col-rows" style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px;">${buildRows(currentStatuses)}</div>
+      <button type="button" class="col-add" style="font-size:0.82rem;background:none;border:1px dashed var(--surface1);color:var(--subtext0);border-radius:4px;padding:4px 10px;cursor:pointer;width:100%;margin-bottom:10px;">+ Add column</button>
+      <div class="col-error" style="display:none;color:var(--red);font-size:0.84rem;margin-bottom:6px;"></div>
+      <div class="row">
+        <button type="button" class="cancel">Cancel</button>
+        <button type="button" class="save">Save</button>
+      </div>`;
+    document.body.appendChild(pop);
+
+    function getStatuses() {
+      return [...pop.querySelectorAll(".col-name")].map((i) => i.value.trim()).filter(Boolean);
+    }
+    function rebuildRows(statuses) {
+      pop.querySelector(".col-rows").innerHTML = buildRows(statuses);
+    }
+
+    pop.querySelector(".col-add").addEventListener("click", () => {
+      rebuildRows([...getStatuses(), ""]);
+      const inputs = pop.querySelectorAll(".col-name");
+      inputs[inputs.length - 1]?.focus();
+    });
+    pop.addEventListener("click", (ev) => {
+      const t = ev.target instanceof HTMLElement ? ev.target : null;
+      if (!t) return;
+      const up = t.closest(".col-up");
+      const down = t.closest(".col-down");
+      const del = t.closest(".col-del");
+      if (up) {
+        const i = parseInt(up.getAttribute("data-i"));
+        const s = getStatuses(); if (i > 0) { [s[i-1], s[i]] = [s[i], s[i-1]]; rebuildRows(s); }
+      }
+      if (down) {
+        const i = parseInt(down.getAttribute("data-i"));
+        const s = getStatuses(); if (i < s.length - 1) { [s[i], s[i+1]] = [s[i+1], s[i]]; rebuildRows(s); }
+      }
+      if (del) {
+        const i = parseInt(del.getAttribute("data-i"));
+        const s = getStatuses(); s.splice(i, 1); rebuildRows(s);
+      }
+    });
+    pop.querySelector(".cancel").addEventListener("click", () => pop.remove());
+    pop.querySelector(".save").addEventListener("click", async () => {
+      const statuses = getStatuses();
+      const errEl = pop.querySelector(".col-error");
+      if (statuses.length === 0) { errEl.style.display = ""; errEl.textContent = "At least one column is required."; return; }
+      const saveBtn = pop.querySelector(".save");
+      saveBtn.disabled = true;
+      try {
+        const r = await fetch("/api/board/update-statuses", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ project: proj, boardId, statuses }),
+        });
+        if (r.ok) { pop.remove(); refetchActiveTab(); }
+        else { const e = await r.json().catch(() => ({})); errEl.style.display = ""; errEl.textContent = "Save failed: " + (e.error || r.status); saveBtn.disabled = false; }
+      } catch (e) { errEl.style.display = ""; errEl.textContent = "Save failed: " + e; saveBtn.disabled = false; }
+    });
+    setTimeout(() => document.addEventListener("click", (ev) => { if (!pop.contains(ev.target)) pop.remove(); }, { once: true }), 0);
+  }
+
   // ---------- Plan search ----------
   function mountPlanSearch() {
     const kanban = document.querySelector(".kanban");
@@ -328,15 +421,234 @@
     });
   }
 
+  // ---------- Custom tab block comments ----------
+  function wireCustomTabComments(tabId) {
+    const panel = document.querySelector("[data-tab-panel]");
+    if (!panel) return;
+    panel.querySelectorAll("[data-block-id]").forEach((block) => {
+      // Skip blocks inside plan sub-tabs — those are covered by the tab-panel comment system
+      if (block.closest(".plan-tab-panel")) return;
+      // Remove any stale toolbars before re-wiring
+      block.querySelectorAll(".block-toolbar").forEach((t) => t.remove());
+      const toolbar = document.createElement("div");
+      toolbar.className = "block-toolbar";
+      toolbar.style.cssText = "display:flex;gap:6px;margin-top:10px;";
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "comment-btn";
+      btn.setAttribute("data-comment-for", block.getAttribute("data-block-id") || "");
+      btn.textContent = block.getAttribute("data-has-comment") === "true" ? "edit comment" : "+ comment";
+      toolbar.appendChild(btn);
+      block.appendChild(toolbar);
+    });
+    panel.addEventListener("click", (ev) => {
+      const btn = ev.target instanceof HTMLElement ? ev.target.closest(".comment-btn") : null;
+      if (!btn) return;
+      const blockId = btn.getAttribute("data-comment-for");
+      if (blockId) openTabCommentPopover(tabId, blockId, btn);
+    });
+  }
+
+  function openTabCommentPopover(tabId, blockId, triggerBtn) {
+    document.querySelectorAll(".popover").forEach((p) => p.remove());
+    const block = document.querySelector(`[data-block-id="${blockId}"]`);
+    if (!block) return;
+    const existing = block.getAttribute("data-has-comment") === "true" ? triggerBtn.getAttribute("data-comment-text") || "" : "";
+    const pop = document.createElement("div");
+    pop.className = "popover";
+    pop.setAttribute("data-comment-block", blockId);
+    pop.innerHTML = `
+      <h6>comment on ${escapeHtml(blockId)}</h6>
+      ${existing ? `<div class="existing">${escapeHtml(existing)}</div>` : ""}
+      <textarea rows="2" placeholder="${existing ? "overwrite the comment…" : "add a comment…"}"></textarea>
+      <div class="row">
+        <button type="button" class="cancel">cancel</button>
+        ${existing ? `<button type="button" class="delete">delete</button>` : ""}
+        <button type="button" class="save">save</button>
+      </div>`;
+    document.body.appendChild(pop);
+    const rect = block.getBoundingClientRect();
+    pop.style.cssText = `position:absolute;top:${rect.bottom + window.scrollY + 8}px;left:${Math.min(rect.left + window.scrollX, window.innerWidth - 300)}px;`;
+    const ta = pop.querySelector("textarea");
+    ta && ta.focus();
+    pop.querySelector(".cancel").addEventListener("click", () => pop.remove());
+    const delBtn = pop.querySelector(".delete");
+    if (delBtn) {
+      delBtn.addEventListener("click", async () => {
+        delBtn.disabled = true;
+        try {
+          const r = await fetch("/api/tab-comment", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ project, tabId, blockId, text: "" }),
+          });
+          if (r.ok) {
+            block.removeAttribute("data-has-comment");
+            triggerBtn.textContent = "+ comment";
+            triggerBtn.removeAttribute("data-comment-text");
+            pop.remove();
+          } else { const e = await r.json().catch(() => ({})); alert("delete failed: " + (e.error || r.status)); delBtn.disabled = false; }
+        } catch (e) { alert("delete failed: " + e); delBtn.disabled = false; }
+      });
+    }
+    pop.querySelector(".save").addEventListener("click", async () => {
+      const text = ta.value.trim();
+      if (!text) { pop.remove(); return; }
+      const saveBtn = pop.querySelector(".save");
+      saveBtn.disabled = true;
+      try {
+        const r = await fetch("/api/tab-comment", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ project, tabId, blockId, text }),
+        });
+        if (r.ok) {
+          block.setAttribute("data-has-comment", "true");
+          triggerBtn.textContent = "edit comment";
+          triggerBtn.setAttribute("data-comment-text", text);
+          pop.remove();
+        } else { const e = await r.json().catch(() => ({})); alert("save failed: " + (e.error || r.status)); saveBtn.disabled = false; }
+      } catch (e) { alert("save failed: " + e); saveBtn.disabled = false; }
+    });
+    setTimeout(() => document.addEventListener("click", (ev) => {
+      if (!pop.contains(ev.target) && !ev.target?.closest?.(".comment-btn")) pop.remove();
+    }, { once: true }), 0);
+  }
+
+  // ---------- New Tab ("+") button ----------
+  function mountNewTabBtn() {
+    const tabBar = document.querySelector(".tab-bar");
+    if (!tabBar || tabBar.querySelector(".new-tab-btn")) return;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "new-tab-btn tab";
+    btn.textContent = "+";
+    btn.title = "Create a new tab with AI";
+    btn.addEventListener("click", openNewTabModal);
+    tabBar.appendChild(btn);
+  }
+
+  const INPUT_STYLE = "width:100%;padding:7px 10px;background:var(--mantle);border:1px solid var(--surface0);border-radius:6px;color:var(--text);font-size:0.9rem;font-family:inherit;box-sizing:border-box;";
+
+  function openNewTabModal() {
+    const modal = document.createElement("div");
+    modal.className = "popover";
+    modal.style.cssText = "position:fixed;top:30%;left:50%;transform:translateX(-50%);width:480px;z-index:60;";
+    modal.innerHTML = `
+      <h6>New tab</h6>
+      <div class="tab-type-toggle">
+        <button type="button" class="active" data-type="ai">Custom (AI)</button>
+        <button type="button" data-type="board">Board</button>
+      </div>
+      <input type="text" class="new-tab-title" placeholder="Tab title…"
+        style="${INPUT_STYLE}margin-bottom:8px;" />
+      <div class="modal-ai-section">
+        <textarea class="new-tab-purpose" rows="4" placeholder="Describe what this tab should contain…"
+          style="${INPUT_STYLE}resize:vertical;"></textarea>
+      </div>
+      <div class="modal-board-section" style="display:none">
+        <input type="text" class="new-tab-columns" value="To do, In progress, Done"
+          placeholder="Column names (comma-separated)…"
+          style="${INPUT_STYLE}margin-bottom:8px;" />
+        <textarea class="new-tab-seeds" rows="3" placeholder="Seed cards (one per line, optional)…"
+          style="${INPUT_STYLE}resize:vertical;"></textarea>
+      </div>
+      <div class="modal-error" style="display:none;color:var(--red);font-size:0.85rem;margin-top:6px;"></div>
+      <div class="row" style="margin-top:8px;">
+        <button type="button" class="cancel">Cancel</button>
+        <button type="button" class="save">Create with AI</button>
+      </div>
+      <div class="new-tab-status" hidden style="margin-top:8px;font-size:0.85rem;color:var(--subtext1);"></div>`;
+    document.body.appendChild(modal);
+
+    const titleInput = modal.querySelector(".new-tab-title");
+    const saveBtn = modal.querySelector(".save");
+    const errorEl = modal.querySelector(".modal-error");
+    const aiSection = modal.querySelector(".modal-ai-section");
+    const boardSection = modal.querySelector(".modal-board-section");
+    let activeType = "ai";
+
+    function showError(msg) { errorEl.style.display = ""; errorEl.textContent = msg; }
+    function clearError() { errorEl.style.display = "none"; }
+
+    modal.querySelectorAll(".tab-type-toggle button").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        activeType = btn.getAttribute("data-type");
+        modal.querySelectorAll(".tab-type-toggle button").forEach((b) => b.classList.toggle("active", b === btn));
+        aiSection.style.display = activeType === "ai" ? "" : "none";
+        boardSection.style.display = activeType === "board" ? "" : "none";
+        saveBtn.textContent = activeType === "board" ? "Create board" : "Create with AI";
+        clearError();
+      });
+    });
+
+    titleInput && titleInput.focus();
+    modal.querySelector(".cancel").addEventListener("click", () => modal.remove());
+
+    saveBtn.addEventListener("click", async () => {
+      clearError();
+      const title = titleInput ? titleInput.value.trim() : "";
+      if (!title) { showError("Title is required."); return; }
+
+      if (activeType === "board") {
+        const colsRaw = modal.querySelector(".new-tab-columns")?.value || "";
+        const statuses = colsRaw.split(",").map((s) => s.trim()).filter(Boolean);
+        if (statuses.length === 0) { showError("At least one column is required."); return; }
+        const seedsRaw = modal.querySelector(".new-tab-seeds")?.value.trim() || "";
+        const seeds = seedsRaw ? seedsRaw.split("\n").map((s) => s.trim()).filter(Boolean) : [];
+        const id = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60) || "board";
+        saveBtn.disabled = true; saveBtn.textContent = "Creating…";
+        try {
+          const r = await fetch("/api/board/create", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ project, title, id, statuses }),
+          });
+          const data = await r.json().catch(() => ({}));
+          if (!r.ok) { showError("Create failed: " + (data.error || r.status)); saveBtn.disabled = false; saveBtn.textContent = "Create board"; return; }
+          for (const seed of seeds) {
+            await fetch("/api/board/create-card", {
+              method: "POST", headers: { "content-type": "application/json" },
+              body: JSON.stringify({ project, boardId: data.board_id, title: seed, status: statuses[0] }),
+            });
+          }
+          modal.remove();
+          window.location.href = "?tab=" + encodeURIComponent(data.board_id);
+        } catch (e) { showError("Create failed: " + e); saveBtn.disabled = false; saveBtn.textContent = "Create board"; }
+        return;
+      }
+
+      const purpose = modal.querySelector(".new-tab-purpose")?.value.trim() || "";
+      if (!purpose) { showError("Purpose is required."); return; }
+      const statusEl = modal.querySelector(".new-tab-status");
+      saveBtn.disabled = true; saveBtn.textContent = "Sending to planner…";
+      statusEl.hidden = false; statusEl.textContent = "Planner is generating the tab…";
+      try {
+        const r = await fetch("/api/create-tab", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title, purpose, project }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) { showError("Create failed: " + (data.error || r.status)); saveBtn.disabled = false; saveBtn.textContent = "Create with AI"; statusEl.hidden = true; return; }
+        statusEl.textContent = data.queued ? "Queued — planner is busy. Tab will appear when ready." : "Planner is working… (page will reload when done)";
+        setTimeout(() => {
+          modal.remove();
+          alert("The planner didn't respond in 60 s — check the chat panel.");
+        }, 60000);
+        modal.setAttribute("data-waiting", "1");
+      } catch (e) { showError("Create failed: " + e); saveBtn.disabled = false; saveBtn.textContent = "Create with AI"; statusEl.hidden = true; }
+    });
+  }
+
   // ---------- Post-render init (called after any panel HTML swap) ----------
   function postRenderInit(activeTab) {
     if (activeTab === "plans") { mountNewPlanBtn(); mountPlanSearch(); }
     if (document.querySelector("[data-board-id]")) mountCardBoard();
     if (window.__renderMermaid) window.__renderMermaid();
+    const tabMeta = window.__TAB__;
+    if (tabMeta && tabMeta.tabId === activeTab) wireCustomTabComments(activeTab);
   }
 
   // Initial mount for active tab on first paint.
   postRenderInit(page.getAttribute("data-active-tab") || "");
+  mountNewTabBtn();
 
   // ---------- SSE: layout:changed + tab.updated ----------
   // Reuse the existing app.js EventSource? app.js owns one. To avoid two
@@ -357,7 +669,12 @@
       }
     }
     if (msg.type === "project.updated" && msg.project === project) {
-      // reload to pick up new tabs / description / watchPath
+      const waiting = document.querySelector(".popover[data-waiting]");
+      if (waiting) {
+        const tid = waiting.getAttribute("data-timeout-id");
+        if (tid) clearTimeout(Number(tid));
+        waiting.remove();
+      }
       setTimeout(() => location.reload(), 200);
     }
     if ((msg.type === "plan.deleted" || msg.type === "plan.created" || msg.type === "plan.status") && msg.project === project) {

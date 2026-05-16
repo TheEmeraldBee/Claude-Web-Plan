@@ -414,9 +414,15 @@ async function callToolImpl(name: string, args: unknown): Promise<{ content: { t
       try { await compileSourceForValidation(a.source, `tab-${a.id}`); }
       catch (e) { return err(`compile_failed: ${formatCompileError(e)}`); }
       const title = ("title" in a && a.title) ? a.title : a.id;
+      const existingMeta = storage.readProject(project);
+      const isNew = name === "create_tab" && !existingMeta?.tabs.some((t) => t.id === a.id);
       storage.writeTab(project, a.id, title, a.source);
       invalidate(storage.tabPath(project, a.id));
-      state.broadcast({ type: "tab.updated", project, tabId: a.id });
+      if (isNew) {
+        state.broadcast({ type: "project.updated", project });
+      } else {
+        state.broadcast({ type: "tab.updated", project, tabId: a.id });
+      }
       return ok({ project, tab_id: a.id, title });
     }
 

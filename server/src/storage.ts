@@ -220,6 +220,17 @@ export class Storage {
     return board;
   }
 
+  updateBoardStatuses(project: string, boardId: string, statuses: string[]): CardBoard {
+    if (statuses.length === 0) throw new Error("statuses_empty");
+    const board = this.readCardBoard(project, boardId);
+    if (!board) throw new Error(`board_not_found: ${boardId}`);
+    const statusSet = new Set(statuses);
+    board.statuses = statuses;
+    board.cards = board.cards.map((c) => ({ ...c, status: statusSet.has(c.status) ? c.status : statuses[0]! }));
+    this.writeCardBoard(project, board);
+    return board;
+  }
+
   addCard(project: string, boardId: string, title: string, body: string, status: string): Card {
     const board = this.readCardBoard(project, boardId);
     if (!board) throw new Error(`board_not_found: ${boardId}`);
@@ -255,6 +266,28 @@ export class Storage {
     const board = this.readCardBoard(project, boardId);
     if (!board) throw new Error(`board_not_found: ${boardId}`);
     return status ? board.cards.filter((c) => c.status === status) : board.cards;
+  }
+
+  tabNotesPath(project: string, tabId: string): string {
+    return join(this.tabsDir(project), tabId + ".tab.notes.json");
+  }
+
+  readTabNotes(project: string, tabId: string): Record<string, string> {
+    const p = this.tabNotesPath(project, tabId);
+    if (!existsSync(p)) return {};
+    try { return JSON.parse(readFileSync(p, "utf8")) as Record<string, string>; }
+    catch { return {}; }
+  }
+
+  setTabComment(project: string, tabId: string, blockId: string, text: string) {
+    this.ensureProject(project);
+    const notes = this.readTabNotes(project, tabId);
+    if (text === "") {
+      delete notes[blockId];
+    } else {
+      notes[blockId] = text;
+    }
+    atomicWrite(this.tabNotesPath(project, tabId), JSON.stringify(notes, null, 2));
   }
 
   readTabSource(project: string, id: string): string | null {

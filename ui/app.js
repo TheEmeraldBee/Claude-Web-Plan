@@ -279,7 +279,9 @@
     const targetId = btn.getAttribute("data-for-tab");
     tabs.querySelectorAll(".plan-tab-btn").forEach((b) => b.classList.toggle("active", b === btn));
     tabs.querySelectorAll(".plan-tab-panel").forEach((p) => {
-      p.hidden = p.getAttribute("data-tab-id") !== targetId;
+      const isTarget = p.getAttribute("data-tab-id") === targetId;
+      p.hidden = !isTarget;
+      if (!isTarget) p.querySelectorAll(".block-toolbar").forEach((t) => t.remove());
     });
   });
 
@@ -651,6 +653,58 @@
         <div class="q-options">${opts}${otherOpt}</div></div>`;
     }).join("");
   }
+  // ---------- DecisionPanel submit ----------
+  document.addEventListener("click", async (ev) => {
+    const btn = ev.target instanceof HTMLElement ? ev.target.closest(".btn-submit-answers") : null;
+    if (!btn) return;
+    const qpanel = btn.closest(".qpanel");
+    if (!qpanel) return;
+    const blockEl = qpanel.closest("[data-block-id]");
+    const blockId = blockEl ? blockEl.getAttribute("data-block-id") : "decisions";
+    const planTitle = PLAN ? PLAN.id : "current plan";
+    const lines = [];
+    qpanel.querySelectorAll(".question[data-q]").forEach((q) => {
+      const kind = q.getAttribute("data-q-kind");
+      const text = (q.querySelector(".q-text") || {}).textContent?.trim() || "";
+      let answer = "";
+      if (kind === "freeform") {
+        const ta = q.querySelector(".q-freeform");
+        answer = (ta && ta.value.trim()) || "(empty)";
+      } else if (kind === "single") {
+        const sel = q.querySelector("input[type=radio]:checked");
+        if (sel) {
+          answer = sel.value === "__other__"
+            ? "Other: " + ((q.querySelector(".q-other-input") || {}).value || "")
+            : sel.value;
+        } else {
+          answer = "(no selection)";
+        }
+      } else {
+        const sels = [...q.querySelectorAll("input[type=checkbox]:checked")];
+        answer = sels.map((s) => s.value === "__other__"
+          ? "Other: " + ((q.querySelector(".q-other-input") || {}).value || "")
+          : s.value).join(", ") || "(none)";
+      }
+      if (text) lines.push(`- ${text}: ${answer}`);
+    });
+    if (lines.length === 0) return;
+    const text = `Answers for [${blockId}] in ${planTitle}:\n${lines.join("\n")}`;
+    btn.disabled = true;
+    try {
+      const r = await fetch("/api/message", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text, source: "decisions" }),
+      });
+      if (r.ok) showChatHint("answers sent to planner");
+      else alert("send failed: " + r.status);
+    } catch (e) {
+      alert("send failed: " + e);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
   function collectAnswers(root, qs) {
     const ans = [];
     (qs || []).forEach((q, i) => {

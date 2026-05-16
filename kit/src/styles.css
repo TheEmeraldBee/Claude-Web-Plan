@@ -754,6 +754,7 @@ pre.mermaid svg { max-width: 100%; height: auto; }
   cursor: pointer;
   transition: color 0.15s, border-color 0.15s;
 }
+.tab-bar button.tab { background: transparent; border: none; font-family: inherit; }
 .tab-bar .tab:hover { color: var(--text); text-decoration: none; }
 .tab-bar .tab.active {
   color: var(--mauve);
@@ -925,7 +926,7 @@ a.plan-row .when { color: var(--subtext0); font-size: 0.84rem; font-family: ui-m
   gap: 4px;
   border-bottom: 1px solid var(--surface0);
   margin-bottom: 16px;
-  overflow-x: auto;
+  flex-wrap: wrap;
 }
 .plan-tab-btn {
   background: transparent;
@@ -935,7 +936,6 @@ a.plan-row .when { color: var(--subtext0); font-size: 0.84rem; font-family: ui-m
   font-size: 0.9rem;
   color: var(--subtext0);
   cursor: pointer;
-  white-space: nowrap;
   transition: color 0.15s, border-color 0.15s;
   font-family: inherit;
   display: inline-flex;
@@ -975,6 +975,22 @@ a.plan-row .when { color: var(--subtext0); font-size: 0.84rem; font-family: ui-m
 }
 .plan .plan-tab-panel .tab-panel-toolbar { display: flex; }
 .plan[data-status="implemented"] .plan-tab-panel .tab-panel-toolbar { display: none; }
+.tab-panel-toolbar button {
+  background: var(--surface0);
+  color: var(--subtext1);
+  border: 1px solid var(--surface1);
+  border-radius: 999px;
+  padding: 3px 12px;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.tab-panel-toolbar button:hover {
+  background: var(--surface1);
+  color: var(--text);
+}
+@media (max-width: 480px) {
+  .plan-tab-btn { padding: 6px 10px; font-size: 0.82rem; }
+}
 
 /* Slideshow */
 .slideshow {
@@ -1124,3 +1140,47 @@ a.plan-row .when { color: var(--subtext0); font-size: 0.84rem; font-family: ui-m
 }
 .ai-block-btn:hover, .new-plan-btn:hover { border-color: var(--mauve); color: var(--mauve); }
 .new-plan-btn { margin-bottom: 12px; }
+
+/* Tab type toggle (new-tab modal) */
+.tab-type-toggle {
+  display: flex;
+  gap: 2px;
+  background: var(--surface0);
+  border-radius: 6px;
+  padding: 3px;
+  margin-bottom: 12px;
+}
+.tab-type-toggle button {
+  flex: 1;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  padding: 5px 12px;
+  font-size: 0.85rem;
+  color: var(--subtext0);
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s, color 0.15s;
+}
+.tab-type-toggle button.active { background: var(--mauve); color: var(--base); font-weight: 600; }
+
+/* Card board header */
+.card-board-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.card-board-title { font-weight: 600; color: var(--text); }
+.card-board-edit-btn {
+  background: transparent;
+  border: 1px solid var(--surface1);
+  color: var(--subtext0);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 0.82rem;
+  cursor: pointer;
+  font-family: inherit;
+  transition: border-color 0.15s, color 0.15s;
+}
+.card-board-edit-btn:hover { border-color: var(--mauve); color: var(--mauve); }
