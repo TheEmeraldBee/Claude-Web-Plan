@@ -9,6 +9,7 @@ import { spawn } from "node:child_process";
 
 import { startHttp, config, storage } from "./http.js";
 import { state, type AskedQuestion } from "./state.js";
+import { THEMES } from "./themes.js";
 import {
   appendBlock,
   blockIdsIn,
@@ -63,6 +64,7 @@ const QuestionSchema = z.object({
   kind: z.enum(["single", "multi", "freeform", "confirm"]),
   options: z.array(z.string()).optional(),
   placeholder: z.string().optional(),
+  allow_other: z.boolean().optional(),
 });
 
 const CreatePlanSchema = z.object({
@@ -156,6 +158,56 @@ const CheckSchema = z.object({
   tab_id: z.string().optional(),
 });
 
+const SetThemeSchema = z.object({
+  project: z.string().optional(),
+  theme: z.union([z.string(), z.record(z.string())]),
+});
+
+const InitHomepageSchema = z.object({
+  project: z.string().optional(),
+});
+
+const CreateCardBoardSchema = z.object({
+  project: z.string().optional(),
+  id: z.string().regex(/^[a-z][a-z0-9-]*$/),
+  title: z.string().min(1),
+  statuses: z.array(z.string().min(1)).min(1),
+});
+
+const CardRefSchema = z.object({
+  project: z.string().optional(),
+  board_id: z.string(),
+});
+
+const CreateCardSchema = z.object({
+  project: z.string().optional(),
+  board_id: z.string(),
+  title: z.string().min(1),
+  body: z.string().optional(),
+  status: z.string(),
+});
+
+const UpdateCardSchema = z.object({
+  project: z.string().optional(),
+  board_id: z.string(),
+  card_id: z.string(),
+  title: z.string().optional(),
+  body: z.string().optional(),
+  status: z.string().optional(),
+});
+
+const DeleteCardSchema = z.object({
+  project: z.string().optional(),
+  board_id: z.string(),
+  card_id: z.string(),
+});
+
+const ListCardsSchema = z.object({
+  project: z.string().optional(),
+  board_id: z.string(),
+  status: z.string().optional(),
+});
+
 interface CheckItem {
   kind: "plan" | "tab";
   id: string;
@@ -208,8 +260,12 @@ async function callToolImpl(name: string, args: unknown): Promise<{ content: { t
       result.questions.forEach((q, i) => {
         const ans = result.answers[i];
         lines.push(`${i+1}. ${q.text}`);
-        if (Array.isArray(ans)) ans.forEach((a) => lines.push(`   → ${a}`));
-        else lines.push(`   → ${ans ?? "(no answer)"}`);
+        const fmt = (a: unknown) =>
+          typeof a === "string" && a.startsWith("__other__:")
+            ? `Other: ${a.slice(10)}`
+            : String(a ?? "(no answer)");
+        if (Array.isArray(ans)) ans.forEach((a) => lines.push(`   → ${fmt(a)}`));
+        else lines.push(`   → ${fmt(ans)}`);
       });
       return ok(lines.join("\n"));
     }
@@ -391,6 +447,137 @@ async function callToolImpl(name: string, args: unknown): Promise<{ content: { t
       return ok({ deleted: removed, plan_id: a.plan_id, project });
     }
 
+    case "set_theme": {
+      const a = SetThemeSchema.parse(args);
+      const project = defaultProject(a.project);
+      if (typeof a.theme === "string" && !THEMES[a.theme]) {
+        return err(`unknown_theme: ${a.theme}. Available: ${Object.keys(THEMES).join(", ")}`);
+      }
+      storage.setTheme(project, a.theme);
+      state.broadcast({ type: "project.updated", project });
+      return ok({ project, theme: a.theme });
+    }
+
+    case "init_project_homepage": {
+      const a = InitHomepageSchema.parse(args);
+      const project = defaultProject(a.project);
+      const meta = storage.readProject(project);
+      if (!meta) return err(`project_not_found: ${project}`);
+      const plans = storage.listPlans(project);
+      const proposed = plans.filter((p) => p.status === "proposed").length;
+      const approved = plans.filter((p) => p.status === "approved").length;
+      const implemented = plans.filter((p) => p.status === "implemented").length;
+      const active = plans.filter((p) => p.status === "proposed" || p.status === "approved");
+      const done = plans.filter((p) => p.status === "implemented");
+      const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/`/g, "\\`");
+      const planItems = (list: typeof plans) =>
+        list.map((p) => `        { path: "${esc(p.id)}", desc: "${esc(p.title)} — ${p.status}" },`).join("\n");
+      const source = `import { Plan, Block, Callout, FileList, DecisionPanel } from "@web-planner/kit";
+
+export default () => (
+  <Plan title="${esc(meta.name || meta.slug)}" status="proposed">
+    <Block id="b-home-header" kind="summary">
+      <Callout>${esc(meta.description || "Project homepage. Ask the planner to update this description.")}</Callout>
+    </Block>
+
+    <Block id="b-home-stats" kind="detail">
+      <p>
+        <strong>${proposed}</strong> proposed ·{" "}
+        <strong>${approved}</strong> approved ·{" "}
+        <strong>${implemented}</strong> implemented
+      </p>
+    </Block>${active.length > 0 ? `
+
+    <Block id="b-home-active" kind="files">
+      <FileList items={[
+${planItems(active)}
+      ]} />
+    </Block>` : ""}${done.length > 0 ? `
+
+    <Block id="b-home-done" kind="files">
+      <FileList items={[
+${planItems(done)}
+      ]} />
+    </Block>` : ""}
+
+    <Block id="b-home-quickstart" kind="detail">
+      <DecisionPanel questions={[{
+        text: "What do you want to do today?",
+        kind: "single",
+        options: [
+          { value: "Draft a new plan" },
+          { value: "Review open plans" },
+          { value: "Change theme" },
+        ],
+        allow_other: true,
+      }]} />
+    </Block>
+  </Plan>
+);
+`;
+      try { validatePlanSource(source); } catch (e) { return err(e instanceof Error ? e.message : String(e)); }
+      try { await compileSourceForValidation(source, "tab-home"); }
+      catch (e) { return err(`compile_failed: ${formatCompileError(e)}`); }
+      storage.writeTab(project, "home", "Home", source);
+      invalidate(storage.tabPath(project, "home"));
+      state.broadcast({ type: "tab.updated", project, tabId: "home" });
+      const url = `http://localhost:${config.port}/projects/${encodeURIComponent(project)}?tab=home`;
+      maybeOpen(url, "always");
+      return ok({ project, tab_id: "home", url });
+    }
+
+    case "create_card_board": {
+      const a = CreateCardBoardSchema.parse(args);
+      const project = defaultProject(a.project);
+      try { storage.createCardBoard(project, a.id, a.title, a.statuses); }
+      catch (e) { return err(e instanceof Error ? e.message : String(e)); }
+      state.broadcast({ type: "project.updated", project });
+      return ok({ project, board_id: a.id, title: a.title, statuses: a.statuses });
+    }
+
+    case "create_card": {
+      const a = CreateCardSchema.parse(args);
+      const project = defaultProject(a.project);
+      try {
+        const card = storage.addCard(project, a.board_id, a.title, a.body ?? "", a.status);
+        state.broadcast({ type: "board:changed", project, boardId: a.board_id });
+        return ok({ card_id: card.id, board_id: a.board_id, status: card.status });
+      } catch (e) { return err(e instanceof Error ? e.message : String(e)); }
+    }
+
+    case "update_card": {
+      const a = UpdateCardSchema.parse(args);
+      const project = defaultProject(a.project);
+      try {
+        const card = storage.updateCard(project, a.board_id, a.card_id, {
+          ...(a.title !== undefined ? { title: a.title } : {}),
+          ...(a.body !== undefined ? { body: a.body } : {}),
+          ...(a.status !== undefined ? { status: a.status } : {}),
+        });
+        state.broadcast({ type: "board:changed", project, boardId: a.board_id });
+        return ok({ card_id: card.id, board_id: a.board_id, status: card.status });
+      } catch (e) { return err(e instanceof Error ? e.message : String(e)); }
+    }
+
+    case "delete_card": {
+      const a = DeleteCardSchema.parse(args);
+      const project = defaultProject(a.project);
+      try {
+        const removed = storage.deleteCard(project, a.board_id, a.card_id);
+        state.broadcast({ type: "board:changed", project, boardId: a.board_id });
+        return ok({ deleted: removed, card_id: a.card_id });
+      } catch (e) { return err(e instanceof Error ? e.message : String(e)); }
+    }
+
+    case "list_cards": {
+      const a = ListCardsSchema.parse(args);
+      const project = defaultProject(a.project);
+      try {
+        const cards = storage.listCards(project, a.board_id, a.status);
+        return ok({ board_id: a.board_id, count: cards.length, cards });
+      } catch (e) { return err(e instanceof Error ? e.message : String(e)); }
+    }
+
     case "check": {
       const a = CheckSchema.parse(args);
       const project = defaultProject(a.project);
@@ -476,6 +663,13 @@ const TOOLS = [
   { name: "get_project", description: "Read project metadata (name, description, watchPath, tabs).", inputSchema: { type: "object", properties: { project: { type: "string" } } } },
   { name: "delete_plan", description: "Permanently delete a plan (source + meta + notes). Allowed on any status, including implemented. Broadcasts plan.deleted on SSE.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, project: { type: "string" } }, required: ["plan_id"] } },
   { name: "check", description: "Re-compile a plan, a custom tab, or every plan + custom tab in a project. Returns { ok, items: [{ kind, id, ok, error?, block_ids? }] }. Call after every create/update to confirm the persisted state renders.", inputSchema: { type: "object", properties: { project: { type: "string" }, plan_id: { type: "string" }, tab_id: { type: "string" } } } },
+  { name: "set_theme", description: "Set the colour theme for a project. Pass a preset name ('catppuccin-mocha', 'catppuccin-latte', 'nord', 'gruvbox-dark') or a Record<string,string> of CSS variable overrides merged over the default.", inputSchema: { type: "object", properties: { project: { type: "string" }, theme: {} }, required: ["theme"] } },
+  { name: "init_project_homepage", description: "Create or regenerate the Home tab for a project: project header, plan counts, plan links, and a DecisionPanel quick-start. The Home tab is inserted first so it opens by default.", inputSchema: { type: "object", properties: { project: { type: "string" } } } },
+  { name: "create_card_board", description: "Create a new card board tab with user-defined statuses. Cards in the board have a title, optional body, and one of the defined statuses.", inputSchema: { type: "object", properties: { project: { type: "string" }, id: { type: "string" }, title: { type: "string" }, statuses: { type: "array", items: { type: "string" } } }, required: ["id","title","statuses"] } },
+  { name: "create_card", description: "Add a card to a board.", inputSchema: { type: "object", properties: { project: { type: "string" }, board_id: { type: "string" }, title: { type: "string" }, body: { type: "string" }, status: { type: "string" } }, required: ["board_id","title","status"] } },
+  { name: "update_card", description: "Update a card's title, body, or status.", inputSchema: { type: "object", properties: { project: { type: "string" }, board_id: { type: "string" }, card_id: { type: "string" }, title: { type: "string" }, body: { type: "string" }, status: { type: "string" } }, required: ["board_id","card_id"] } },
+  { name: "delete_card", description: "Permanently delete a card from a board.", inputSchema: { type: "object", properties: { project: { type: "string" }, board_id: { type: "string" }, card_id: { type: "string" } }, required: ["board_id","card_id"] } },
+  { name: "list_cards", description: "List all cards on a board, optionally filtered by status.", inputSchema: { type: "object", properties: { project: { type: "string" }, board_id: { type: "string" }, status: { type: "string" } }, required: ["board_id"] } },
 ];
 
 function spawnExistingWatchers() {

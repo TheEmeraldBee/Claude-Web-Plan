@@ -30,6 +30,23 @@ export function DecisionPanel({ questions }: DecisionPanelProps) {
                   </div>
                 </label>
               ))}
+              {q.allow_other ? (
+                <label class="q-option q-option-other">
+                  <input
+                    type={q.kind === "single" ? "radio" : "checkbox"}
+                    name={`q-${qi}`}
+                    value="__other__"
+                  />
+                  <div class="q-option-text">Other…</div>
+                </label>
+              ) : null}
+              {q.allow_other ? (
+                <input
+                  type="text"
+                  class="q-other-input"
+                  placeholder="Please specify…"
+                />
+              ) : null}
             </div>
           )}
         </div>

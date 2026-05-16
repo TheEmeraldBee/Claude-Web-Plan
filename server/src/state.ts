@@ -16,6 +16,7 @@ export interface AskedQuestion {
   kind: "single" | "multi" | "freeform" | "confirm";
   options?: string[];
   placeholder?: string;
+  allow_other?: boolean;
 }
 
 export interface Subscriber {

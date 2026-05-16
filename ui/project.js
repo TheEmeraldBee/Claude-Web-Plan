@@ -21,7 +21,7 @@
         const r = await fetch(`/projects/${encodeURIComponent(project)}/tab/${encodeURIComponent(id)}`);
         panel.innerHTML = await r.text();
         if (id === "layout") loadLayout();
-        if (window.__renderMermaid) window.__renderMermaid();
+        postRenderInit(id);
       } catch (e) {
         panel.innerHTML = `<pre>${String(e)}</pre>`;
       }
@@ -86,7 +86,7 @@
       const r = await fetch(`/projects/${encodeURIComponent(project)}/tab/${encodeURIComponent(active)}`);
       panel.innerHTML = await r.text();
       if (active === "layout") loadLayout();
-      if (window.__renderMermaid) window.__renderMermaid();
+      postRenderInit(active);
     } catch (e) {
       panel.innerHTML = `<pre>${String(e)}</pre>`;
     }
@@ -95,11 +95,13 @@
   // ---------- Kanban drag-and-drop ----------
   let dragId = null;
   let dragFromStatus = null;
+  let dragTitle = null;
   document.addEventListener("dragstart", (ev) => {
     const card = ev.target instanceof HTMLElement ? ev.target.closest(".plan-card") : null;
     if (!card) return;
     dragId = card.getAttribute("data-plan-id");
     dragFromStatus = card.getAttribute("data-plan-status");
+    dragTitle = card.querySelector(".plan-title")?.textContent || dragId;
     card.classList.add("dragging");
     if (ev.dataTransfer) {
       ev.dataTransfer.effectAllowed = "move";
@@ -112,6 +114,7 @@
     document.querySelectorAll(".kanban-col.drop-target").forEach((c) => c.classList.remove("drop-target"));
     dragId = null;
     dragFromStatus = null;
+    dragTitle = null;
   });
   document.addEventListener("dragover", (ev) => {
     const zone = ev.target instanceof HTMLElement ? ev.target.closest("[data-drop-zone]") : null;
@@ -131,6 +134,10 @@
     const fromStatus = dragFromStatus;
     document.querySelectorAll(".kanban-col.drop-target").forEach((c) => c.classList.remove("drop-target"));
     if (!status || status === fromStatus) return;
+    // Confirm before freezing a plan as implemented (irreversible).
+    if (status === "implemented") {
+      if (!confirm(`Mark "${dragTitle || planId}" as implemented? This will freeze the plan — further edits will not be possible.`)) return;
+    }
     // Optimistic move so the user sees the change immediately.
     const card = document.querySelector(`.plan-card[data-plan-id="${cssEscape(planId)}"]`);
     if (card) {
@@ -207,6 +214,130 @@
     }
   });
 
+  // ---------- New Plan button (Plans tab) ----------
+  function mountNewPlanBtn() {
+    const kanban = document.querySelector(".kanban");
+    if (!kanban || document.querySelector(".new-plan-btn")) return;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "new-plan-btn";
+    btn.textContent = "+ New plan";
+    btn.addEventListener("click", openNewPlanModal);
+    kanban.before(btn);
+  }
+
+  function openNewPlanModal() {
+    const modal = document.createElement("div");
+    modal.className = "popover";
+    modal.style.cssText = "position:fixed;top:30%;left:50%;transform:translateX(-50%);width:480px;z-index:60;";
+    modal.innerHTML = `
+      <h6>New plan</h6>
+      <input type="text" class="new-plan-title" placeholder="Plan title…"
+        style="width:100%;margin-bottom:8px;padding:7px 10px;background:var(--mantle);border:1px solid var(--surface0);border-radius:6px;color:var(--text);font-size:0.9rem;font-family:inherit;box-sizing:border-box;" />
+      <textarea class="new-plan-brief" rows="4" placeholder="Describe the plan briefly — the planner will expand it…"
+        style="width:100%;background:var(--mantle);border:1px solid var(--surface0);border-radius:6px;color:var(--text);font-size:0.9rem;font-family:inherit;padding:7px 10px;resize:vertical;box-sizing:border-box;"></textarea>
+      <div class="row" style="margin-top:8px;">
+        <button type="button" class="cancel">Cancel</button>
+        <button type="button" class="save">Create</button>
+      </div>`;
+    document.body.appendChild(modal);
+    const titleInput = modal.querySelector(".new-plan-title");
+    titleInput && titleInput.focus();
+    modal.querySelector(".cancel").addEventListener("click", () => modal.remove());
+    modal.querySelector(".save").addEventListener("click", async () => {
+      const title = titleInput ? titleInput.value.trim() : "";
+      const brief = modal.querySelector(".new-plan-brief")?.value.trim() || "";
+      if (!title || !brief) { alert("Title and brief are required."); return; }
+      const saveBtn = modal.querySelector(".save");
+      saveBtn.disabled = true; saveBtn.textContent = "Creating…";
+      try {
+        const r = await fetch("/api/create-plan-stub", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title, brief, project }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (r.ok) { modal.remove(); if (data.url) location.href = data.url; }
+        else { alert("create failed: " + (data.error || r.status)); saveBtn.disabled = false; saveBtn.textContent = "Create"; }
+      } catch (e) { alert("create failed: " + e); saveBtn.disabled = false; saveBtn.textContent = "Create"; }
+    });
+  }
+
+  // ---------- Card board UI ----------
+  function mountCardBoard() {
+    const board = document.querySelector("[data-board-id]");
+    if (!board) return;
+    const boardId = board.getAttribute("data-board-id");
+    const proj = board.getAttribute("data-project") || project;
+
+    board.addEventListener("click", async (ev) => {
+      const target = ev.target instanceof HTMLElement ? ev.target : null;
+      if (!target) return;
+
+      const addBtn = target.closest(".card-col-add");
+      if (addBtn) {
+        const status = addBtn.getAttribute("data-status");
+        const title = prompt("Card title:");
+        if (!title || !title.trim()) return;
+        const body = prompt("Body (optional):") || "";
+        try {
+          const r = await fetch("/api/board/create-card", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ project: proj, boardId, title: title.trim(), body, status }),
+          });
+          if (!r.ok) { const e = await r.json().catch(() => ({})); alert("create failed: " + (e.error || r.status)); }
+        } catch (e) { alert("create failed: " + e); }
+        return;
+      }
+
+      const card = target.closest(".card-item");
+      if (card) {
+        const cardId = card.getAttribute("data-card-id");
+        const curTitle = card.querySelector(".card-item-title")?.textContent || "";
+        const curBody = card.querySelector(".card-item-body")?.textContent || "";
+        const curStatus = card.querySelector(".card-item-status")?.textContent || "";
+        const newStatus = prompt(`Move to status (current: ${curStatus}):`, curStatus);
+        if (newStatus === null) return;
+        try {
+          const r = await fetch("/api/board/update-card", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ project: proj, boardId, cardId, status: newStatus.trim() || curStatus }),
+          });
+          if (!r.ok) { const e = await r.json().catch(() => ({})); alert("update failed: " + (e.error || r.status)); }
+        } catch (e) { alert("update failed: " + e); }
+      }
+    });
+  }
+
+  // ---------- Plan search ----------
+  function mountPlanSearch() {
+    const kanban = document.querySelector(".kanban");
+    if (!kanban || document.querySelector(".plan-search")) return;
+    const input = document.createElement("input");
+    input.type = "search";
+    input.className = "plan-search";
+    input.placeholder = "Filter plans…";
+    input.setAttribute("aria-label", "Filter plans by title");
+    kanban.before(input);
+    input.addEventListener("input", () => {
+      const q = input.value.trim().toLowerCase();
+      document.querySelectorAll(".plan-card").forEach((card) => {
+        const title = (card.querySelector(".plan-title")?.textContent || "").toLowerCase();
+        card.style.display = !q || title.includes(q) ? "" : "none";
+      });
+      updateColumnCounts();
+    });
+  }
+
+  // ---------- Post-render init (called after any panel HTML swap) ----------
+  function postRenderInit(activeTab) {
+    if (activeTab === "plans") { mountNewPlanBtn(); mountPlanSearch(); }
+    if (document.querySelector("[data-board-id]")) mountCardBoard();
+    if (window.__renderMermaid) window.__renderMermaid();
+  }
+
+  // Initial mount for active tab on first paint.
+  postRenderInit(page.getAttribute("data-active-tab") || "");
+
   // ---------- SSE: layout:changed + tab.updated ----------
   // Reuse the existing app.js EventSource? app.js owns one. To avoid two
   // connections we listen to a custom event app.js dispatches, OR open
@@ -232,6 +363,10 @@
     if ((msg.type === "plan.deleted" || msg.type === "plan.created" || msg.type === "plan.status") && msg.project === project) {
       const active = page.getAttribute("data-active-tab");
       if (active === "plans") refetchActiveTab();
+    }
+    if (msg.type === "board:changed" && msg.project === project) {
+      const active = page.getAttribute("data-active-tab");
+      if (active === msg.boardId) refetchActiveTab();
     }
   };
 })();

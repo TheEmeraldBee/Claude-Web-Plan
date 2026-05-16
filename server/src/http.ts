@@ -7,6 +7,8 @@ import { state } from "./state.js";
 import { Storage } from "./storage.js";
 import { compilePlanFile, invalidate } from "./compile.js";
 import { buildTree } from "./layout.js";
+import { resolveTheme, themeToCSS } from "./themes.js";
+import { type CardBoard } from "./storage.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -56,14 +58,28 @@ function serveStatic(path: string, res: ServerResponse) {
   res.end(readFileSync(path));
 }
 
-function renderShell(title: string, body: string, hasMermaid: boolean, planMeta?: { id: string; project: string; status: string; notes: Record<string, string> }, extraScripts: string = ""): string {
+function slugify(title: string): string {
+  return title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60) || "plan";
+}
+function nowId(slug: string): string {
+  const d = new Date();
+  const ts = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}-${String(d.getHours()).padStart(2,"0")}${String(d.getMinutes()).padStart(2,"0")}`;
+  return `${ts}-${slug}`;
+}
+
+function renderShell(title: string, body: string, hasMermaid: boolean, planMeta?: { id: string; project: string; status: string; notes: Record<string, string> }, extraScripts: string = "", projectSlug?: string): string {
+  let themeStyle = "";
+  if (projectSlug) {
+    const theme = storage.getTheme(projectSlug);
+    if (theme) themeStyle = `<style>${themeToCSS(resolveTheme(theme))}</style>\n`;
+  }
   return `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8" />
 <title>${escapeHtml(title)}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <link rel="stylesheet" href="/kit/styles.css" />
-${planMeta ? `<script>window.__PLAN__ = ${JSON.stringify(planMeta)};</script>` : ""}
+${themeStyle}${planMeta ? `<script>window.__PLAN__ = ${JSON.stringify(planMeta)};</script>` : ""}
 ${hasMermaid ? `<script type="module">
   import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
   mermaid.initialize({ startOnLoad: false, theme: "dark", themeVariables: { background: "#1e1e2e", primaryColor: "#313244", primaryTextColor: "#cdd6f4", lineColor: "#89b4fa" } });
@@ -237,7 +253,7 @@ async function handlePlanPage(_req: IncomingMessage, res: ServerResponse, projec
       project: rec.meta.project,
       status: rec.meta.status,
       notes: rec.notes,
-    }));
+    }, "", rec.meta.project));
   } catch (e) {
     res.writeHead(500, { "content-type": "text/html; charset=utf-8" });
     res.end(`<pre>${escapeHtml(e instanceof Error ? e.message : String(e))}</pre>`);
@@ -348,12 +364,15 @@ async function handleProjectPage(req: IncomingMessage, res: ServerResponse, proj
   const meta = storage.readProject(project);
   if (!meta) return send(res, 404, "project not found");
   const url = new URL(req.url ?? "/", `http://localhost:${config.port}`);
-  const requested = url.searchParams.get("tab") || meta.tabs[0]?.id || "plans";
-  const tab = meta.tabs.find((t) => t.id === requested) ?? meta.tabs[0]!;
+  const homeTab = meta.tabs.find((t) => t.id === "home");
+  const defaultTab = homeTab ?? meta.tabs[0];
+  const requested = url.searchParams.get("tab") || defaultTab?.id || "plans";
+  const tab = meta.tabs.find((t) => t.id === requested) ?? defaultTab!;
   let tabBody = "";
   let hasMermaid = false;
   try {
     if (tab.kind === "builtin") tabBody = await renderBuiltinTab(project, tab.id);
+    else if (tab.kind === "board") tabBody = renderBoardTab(project, tab.id);
     else {
       tabBody = await renderCustomTab(project, tab.id);
       hasMermaid = /data-mermaid/.test(tabBody);
@@ -374,7 +393,30 @@ async function handleProjectPage(req: IncomingMessage, res: ServerResponse, proj
     <div class="tab-panel" data-tab-panel>${tabBody}</div>
   </main>`;
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-  res.end(renderShell(`${meta.name || project} — web-planner`, body, hasMermaid, undefined, `<script type="module" src="/ui/project.js"></script>`));
+  res.end(renderShell(`${meta.name || project} — web-planner`, body, hasMermaid, undefined, `<script type="module" src="/ui/project.js"></script>`, project));
+}
+
+function renderBoardTab(project: string, boardId: string): string {
+  const board = storage.readCardBoard(project, boardId);
+  if (!board) return `<p class="muted">Board not found: ${escapeHtml(boardId)}</p>`;
+  const cols = board.statuses.map((status) => {
+    const cards = board.cards.filter((c) => c.status === status);
+    const cardHtml = cards.map((c) => `
+      <div class="card-item" data-card-id="${escapeHtml(c.id)}" data-board-id="${escapeHtml(boardId)}" data-project="${escapeHtml(project)}">
+        <div class="card-item-title">${escapeHtml(c.title)}</div>
+        ${c.body ? `<div class="card-item-body">${escapeHtml(c.body)}</div>` : ""}
+        <span class="card-item-status">${escapeHtml(status)}</span>
+      </div>`).join("");
+    return `<div class="card-col" data-status="${escapeHtml(status)}">
+      <header class="card-col-head">
+        <h4>${escapeHtml(status)}</h4>
+        <span class="muted small">${cards.length}</span>
+      </header>
+      <div class="card-col-body">${cardHtml}</div>
+      <button type="button" class="card-col-add" data-board-id="${escapeHtml(boardId)}" data-status="${escapeHtml(status)}" data-project="${escapeHtml(project)}">+ Add card</button>
+    </div>`;
+  }).join("");
+  return `<div class="card-board" data-board-id="${escapeHtml(boardId)}" data-project="${escapeHtml(project)}">${cols}</div>`;
 }
 
 async function handleProjectTabFragment(req: IncomingMessage, res: ServerResponse, project: string, tabId: string) {
@@ -383,7 +425,10 @@ async function handleProjectTabFragment(req: IncomingMessage, res: ServerRespons
   const tab = meta.tabs.find((t) => t.id === tabId);
   if (!tab) return send(res, 404, "tab not found");
   try {
-    const body = tab.kind === "builtin" ? await renderBuiltinTab(project, tab.id) : await renderCustomTab(project, tab.id);
+    let body: string;
+    if (tab.kind === "builtin") body = await renderBuiltinTab(project, tab.id);
+    else if (tab.kind === "board") body = renderBoardTab(project, tab.id);
+    else body = await renderCustomTab(project, tab.id);
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(body);
   } catch (e) {
@@ -401,6 +446,77 @@ async function handleLayoutApi(_req: IncomingMessage, res: ServerResponse, proje
 
 async function handleState(_req: IncomingMessage, res: ServerResponse) {
   sendJson(res, 200, state.activity);
+}
+
+async function handleGenerateBlock(req: IncomingMessage, res: ServerResponse) {
+  const body = await readBody(req);
+  let parsed: { planId?: string; prompt?: string; project?: string };
+  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
+  const { planId, prompt, project } = parsed;
+  if (!planId || !prompt) return sendJson(res, 400, { error: "missing_fields" });
+  const text = `[generate-block planId=${planId}${project ? ` project=${project}` : ""}]\n${prompt}`;
+  const r = state.enqueueOrDeliver({ text, kind: "chat", meta: { planId, project } });
+  sendJson(res, 200, { ok: true, queued: r.queued });
+}
+
+async function handleCreatePlanStub(req: IncomingMessage, res: ServerResponse) {
+  const body = await readBody(req);
+  let parsed: { title?: string; brief?: string; project?: string };
+  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
+  const { title, brief, project: proj } = parsed;
+  if (!title || !brief) return sendJson(res, 400, { error: "missing_fields" });
+  const project = proj || "default";
+  const slug = slugify(title);
+  const id = nowId(slug);
+  const now = new Date().toISOString();
+  const escapedTitle = title.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const escapedBrief = brief.replace(/[<>&]/g, (c: string) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]!));
+  const source = `import { Plan, Block, Callout } from "@web-planner/kit";\n\nexport default () => (\n  <Plan title="${escapedTitle}" status="proposed">\n    <Block id="b-brief" kind="summary">\n      <Callout>${escapedBrief}</Callout>\n    </Block>\n  </Plan>\n);\n`;
+  storage.writePlan({ meta: { id, title, slug, status: "proposed", created: now, modified: now, project }, source, notes: {} });
+  state.broadcast({ type: "plan.created", planId: id, project });
+  const text = `[expand-plan planId=${id}]\n${brief}`;
+  const r = state.enqueueOrDeliver({ text, kind: "chat", meta: { planId: id, project } });
+  const url = `http://localhost:${config.port}/plans/${encodeURIComponent(project)}/${encodeURIComponent(id)}`;
+  sendJson(res, 200, { ok: true, planId: id, url, queued: r.queued });
+}
+
+async function handleBoardCreateCard(req: IncomingMessage, res: ServerResponse) {
+  const body = await readBody(req);
+  let parsed: { project?: string; boardId?: string; title?: string; body?: string; status?: string };
+  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
+  const { project, boardId, title, body: cardBody, status } = parsed;
+  if (!project || !boardId || !title || !status) return sendJson(res, 400, { error: "missing_fields" });
+  try {
+    const card = storage.addCard(project, boardId, title, cardBody ?? "", status);
+    state.broadcast({ type: "board:changed", project, boardId });
+    sendJson(res, 200, { ok: true, card_id: card.id });
+  } catch (e) { sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) }); }
+}
+
+async function handleBoardUpdateCard(req: IncomingMessage, res: ServerResponse) {
+  const body = await readBody(req);
+  let parsed: { project?: string; boardId?: string; cardId?: string; title?: string; body?: string; status?: string };
+  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
+  const { project, boardId, cardId, ...patch } = parsed;
+  if (!project || !boardId || !cardId) return sendJson(res, 400, { error: "missing_fields" });
+  try {
+    const card = storage.updateCard(project, boardId, cardId, patch as { title?: string; body?: string; status?: string });
+    state.broadcast({ type: "board:changed", project, boardId });
+    sendJson(res, 200, { ok: true, card_id: card.id });
+  } catch (e) { sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) }); }
+}
+
+async function handleBoardDeleteCard(req: IncomingMessage, res: ServerResponse) {
+  const body = await readBody(req);
+  let parsed: { project?: string; boardId?: string; cardId?: string };
+  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
+  const { project, boardId, cardId } = parsed;
+  if (!project || !boardId || !cardId) return sendJson(res, 400, { error: "missing_fields" });
+  try {
+    const removed = storage.deleteCard(project, boardId, cardId);
+    state.broadcast({ type: "board:changed", project, boardId });
+    sendJson(res, 200, { ok: true, deleted: removed });
+  } catch (e) { sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) }); }
 }
 
 async function router(req: IncomingMessage, res: ServerResponse) {
@@ -433,6 +549,11 @@ async function router(req: IncomingMessage, res: ServerResponse) {
     if (m === "POST" && url.pathname === "/api/comment") return handleComment(req, res);
     if (m === "POST" && url.pathname === "/api/plan/status") return handlePlanStatus(req, res);
     if (m === "POST" && url.pathname === "/api/plan/delete") return handleDeletePlan(req, res);
+    if (m === "POST" && url.pathname === "/api/generate-block") return handleGenerateBlock(req, res);
+    if (m === "POST" && url.pathname === "/api/create-plan-stub") return handleCreatePlanStub(req, res);
+    if (m === "POST" && url.pathname === "/api/board/create-card") return handleBoardCreateCard(req, res);
+    if (m === "POST" && url.pathname === "/api/board/update-card") return handleBoardUpdateCard(req, res);
+    if (m === "POST" && url.pathname === "/api/board/delete-card") return handleBoardDeleteCard(req, res);
     const ansMatch = url.pathname.match(/^\/api\/answer\/([\w-]+)$/);
     if (m === "POST" && ansMatch) return handleAnswer(req, res, ansMatch[1] as string);
 

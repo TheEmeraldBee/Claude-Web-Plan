@@ -11,5 +11,9 @@ export { Tree } from "./Tree.js";
 export { Timeline } from "./Timeline.js";
 export { StateChips } from "./StateChips.js";
 export { CodeBlock } from "./CodeBlock.js";
+export { Tabs, Tab } from "./Tabs.js";
+export { Slideshow, Slide } from "./Slideshow.js";
 
 export type * from "./types.js";
+export type { TabProps, TabsProps } from "./Tabs.js";
+export type { SlideProps, SlideshowProps } from "./Slideshow.js";

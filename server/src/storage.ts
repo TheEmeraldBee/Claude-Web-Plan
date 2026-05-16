@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
 
 export type PlanStatus = "proposed" | "approved" | "implemented" | "abandoned";
 
@@ -31,7 +32,7 @@ export interface PlanRecord {
 export interface TabRef {
   id: string;
   title: string;
-  kind: "builtin" | "custom";
+  kind: "builtin" | "custom" | "board";
 }
 
 export interface ProjectMeta {
@@ -40,8 +41,25 @@ export interface ProjectMeta {
   description: string;
   watchPath: string;       // absolute path to source dir; "" means none
   tabs: TabRef[];
+  theme?: string | Record<string, string>;
   created: string;
   modified: string;
+}
+
+export interface Card {
+  id: string;
+  title: string;
+  body: string;
+  status: string;
+  created: string;
+  modified: string;
+}
+
+export interface CardBoard {
+  id: string;
+  title: string;
+  statuses: string[];
+  cards: Card[];
 }
 
 const META_SUFFIX = ".meta.json";
@@ -143,10 +161,100 @@ export class Storage {
     const meta = this.readProject(project)!;
     const i = meta.tabs.findIndex((t) => t.id === id);
     const entry: TabRef = { id, title, kind: "custom" };
+    if (i === -1) {
+      if (id === "home") {
+        const firstCustom = meta.tabs.findIndex((t) => t.kind !== "builtin");
+        meta.tabs.splice(firstCustom === -1 ? 0 : firstCustom, 0, entry);
+      } else {
+        meta.tabs.push(entry);
+      }
+    } else {
+      meta.tabs[i] = entry;
+    }
+    this.writeProject(meta);
+    return meta;
+  }
+
+  setTheme(project: string, theme: string | Record<string, string>): ProjectMeta {
+    this.ensureProject(project);
+    const existing = this.readProject(project)!;
+    const next: ProjectMeta = { ...existing, theme };
+    this.writeProject(next);
+    return next;
+  }
+
+  getTheme(project: string): string | Record<string, string> | undefined {
+    return this.readProject(project)?.theme;
+  }
+
+  boardsDir(project: string): string {
+    return join(this.projectDir(project), "boards");
+  }
+  boardPath(project: string, boardId: string): string {
+    return join(this.boardsDir(project), boardId + ".json");
+  }
+
+  writeCardBoard(project: string, board: CardBoard): void {
+    this.ensureProject(project);
+    ensureDir(this.boardsDir(project));
+    atomicWrite(this.boardPath(project, board.id), JSON.stringify(board, null, 2));
+  }
+
+  readCardBoard(project: string, boardId: string): CardBoard | null {
+    const path = this.boardPath(project, boardId);
+    if (!existsSync(path)) return null;
+    try { return JSON.parse(readFileSync(path, "utf8")) as CardBoard; }
+    catch { return null; }
+  }
+
+  createCardBoard(project: string, id: string, title: string, statuses: string[]): CardBoard {
+    if (!/^[a-z][a-z0-9-]*$/.test(id)) throw new Error(`invalid_board_id: ${id}`);
+    const board: CardBoard = { id, title, statuses, cards: [] };
+    this.writeCardBoard(project, board);
+    const meta = this.readProject(project)!;
+    const i = meta.tabs.findIndex((t) => t.id === id);
+    const entry: TabRef = { id, title, kind: "board" };
     if (i === -1) meta.tabs.push(entry);
     else meta.tabs[i] = entry;
     this.writeProject(meta);
-    return meta;
+    return board;
+  }
+
+  addCard(project: string, boardId: string, title: string, body: string, status: string): Card {
+    const board = this.readCardBoard(project, boardId);
+    if (!board) throw new Error(`board_not_found: ${boardId}`);
+    if (!board.statuses.includes(status)) throw new Error(`invalid_status: ${status}. Valid: ${board.statuses.join(", ")}`);
+    const now = new Date().toISOString();
+    const card: Card = { id: randomUUID(), title, body, status, created: now, modified: now };
+    board.cards.push(card);
+    this.writeCardBoard(project, board);
+    return card;
+  }
+
+  updateCard(project: string, boardId: string, cardId: string, patch: Partial<Pick<Card, "title" | "body" | "status">>): Card {
+    const board = this.readCardBoard(project, boardId);
+    if (!board) throw new Error(`board_not_found: ${boardId}`);
+    const i = board.cards.findIndex((c) => c.id === cardId);
+    if (i === -1) throw new Error(`card_not_found: ${cardId}`);
+    if (patch.status && !board.statuses.includes(patch.status)) throw new Error(`invalid_status: ${patch.status}`);
+    board.cards[i] = { ...board.cards[i]!, ...patch, modified: new Date().toISOString() };
+    this.writeCardBoard(project, board);
+    return board.cards[i]!;
+  }
+
+  deleteCard(project: string, boardId: string, cardId: string): boolean {
+    const board = this.readCardBoard(project, boardId);
+    if (!board) throw new Error(`board_not_found: ${boardId}`);
+    const before = board.cards.length;
+    board.cards = board.cards.filter((c) => c.id !== cardId);
+    this.writeCardBoard(project, board);
+    return board.cards.length < before;
+  }
+
+  listCards(project: string, boardId: string, status?: string): Card[] {
+    const board = this.readCardBoard(project, boardId);
+    if (!board) throw new Error(`board_not_found: ${boardId}`);
+    return status ? board.cards.filter((c) => c.status === status) : board.cards;
   }
 
   readTabSource(project: string, id: string): string | null {

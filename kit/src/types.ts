@@ -47,6 +47,7 @@ export interface DecisionQuestion {
   kind: DecisionKind;
   options?: DecisionOption[];
   placeholder?: string;
+  allow_other?: boolean;
 }
 export interface DecisionPanelProps {
   questions: DecisionQuestion[];
