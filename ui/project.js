@@ -17,6 +17,7 @@
       tabs.forEach((x) => x.classList.toggle("active", x === t));
       page.setAttribute("data-active-tab", id);
       history.replaceState(null, "", "?tab=" + encodeURIComponent(id));
+      try { localStorage.setItem("wp:tab:" + project, id); } catch {}
       try {
         const r = await fetch(`/projects/${encodeURIComponent(project)}/tab/${encodeURIComponent(id)}`);
         panel.innerHTML = await r.text();
@@ -88,6 +89,10 @@
     try {
       const r = await fetch(`/projects/${encodeURIComponent(project)}/tab/${encodeURIComponent(active)}`);
       panel.innerHTML = await r.text();
+      const tabEl = document.querySelector(`.tab[data-tab-id="${CSS.escape(active)}"]`);
+      const tabKind = tabEl ? tabEl.getAttribute("data-tab-kind") || "" : "";
+      if (tabKind === "custom") window.__TAB__ = { project, tabId: active };
+      else delete window.__TAB__;
       if (active === "layout") loadLayout();
       postRenderInit(active);
     } catch (e) {
@@ -247,6 +252,10 @@
     const titleInput = modal.querySelector(".new-plan-title");
     titleInput && titleInput.focus();
     modal.querySelector(".cancel").addEventListener("click", () => modal.remove());
+    function _outerClickNewPlan(ev) {
+      if (!modal.contains(ev.target)) { modal.remove(); document.removeEventListener("click", _outerClickNewPlan, true); }
+    }
+    setTimeout(() => document.addEventListener("click", _outerClickNewPlan, true), 0);
     modal.querySelector(".save").addEventListener("click", async () => {
       const title = titleInput ? titleInput.value.trim() : "";
       const brief = modal.querySelector(".new-plan-brief")?.value.trim() || "";
@@ -262,6 +271,63 @@
         if (r.ok) { modal.remove(); if (data.url) location.href = data.url; }
         else { alert("create failed: " + (data.error || r.status)); saveBtn.disabled = false; saveBtn.textContent = "Create"; }
       } catch (e) { alert("create failed: " + e); saveBtn.disabled = false; saveBtn.textContent = "Create"; }
+    });
+  }
+
+  // ---------- Card modal (replaces prompt() for add/edit) ----------
+  function openCardModal({ project: proj, boardId, status, cardId, curStatus, statuses }) {
+    document.querySelectorAll(".popover").forEach((p) => p.remove());
+    const isEdit = !!cardId;
+    const modal = document.createElement("div");
+    modal.className = "popover";
+    modal.style.cssText = "position:fixed;top:30%;left:50%;transform:translateX(-50%);width:400px;z-index:60;";
+    const INPUT_S = "width:100%;padding:7px 10px;background:var(--mantle);border:1px solid var(--surface0);border-radius:6px;color:var(--text);font-size:0.9rem;font-family:inherit;box-sizing:border-box;";
+    const statusOpts = (statuses || [status]).map((s) =>
+      `<option value="${escapeHtml(s)}"${s === (curStatus || status) ? " selected" : ""}>${escapeHtml(s)}</option>`
+    ).join("");
+    modal.innerHTML = `
+      <h6>${isEdit ? "Edit card" : "New card"}</h6>
+      ${!isEdit ? `<input type="text" class="card-title-input" placeholder="Card title…" style="${INPUT_S}margin-bottom:8px;" />` : ""}
+      ${!isEdit ? `<textarea class="card-body-input" rows="2" placeholder="Body (optional)…" style="${INPUT_S}resize:vertical;margin-bottom:8px;"></textarea>` : ""}
+      ${isEdit ? `<label style="font-size:0.85rem;color:var(--subtext0);margin-bottom:4px;display:block;">Move to status</label>` : ""}
+      <select class="card-status-input" style="${INPUT_S}margin-bottom:8px;">${statusOpts}</select>
+      <div class="modal-error" style="display:none;color:var(--red);font-size:0.84rem;margin-bottom:6px;"></div>
+      <div class="row" style="margin-top:8px;">
+        <button type="button" class="cancel">Cancel</button>
+        <button type="button" class="save">${isEdit ? "Update" : "Add card"}</button>
+      </div>`;
+    document.body.appendChild(modal);
+    const errEl = modal.querySelector(".modal-error");
+    if (!isEdit) modal.querySelector(".card-title-input").focus();
+    modal.querySelector(".cancel").addEventListener("click", () => modal.remove());
+    modal.querySelector(".save").addEventListener("click", async () => {
+      const newStatus = modal.querySelector(".card-status-input").value;
+      const saveBtn = modal.querySelector(".save");
+      if (!isEdit) {
+        const title = (modal.querySelector(".card-title-input")?.value || "").trim();
+        if (!title) { errEl.style.display = ""; errEl.textContent = "Title is required."; return; }
+        const body = modal.querySelector(".card-body-input")?.value || "";
+        saveBtn.disabled = true;
+        try {
+          const r = await fetch("/api/board/create-card", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ project: proj, boardId, title, body, status: newStatus }),
+          });
+          if (r.ok) modal.remove();
+          else { const e = await r.json().catch(() => ({})); errEl.style.display = ""; errEl.textContent = "Create failed: " + (e.error || r.status); saveBtn.disabled = false; }
+        } catch (e) { errEl.style.display = ""; errEl.textContent = "Create failed: " + e; saveBtn.disabled = false; }
+      } else {
+        if (newStatus === curStatus) { modal.remove(); return; }
+        saveBtn.disabled = true;
+        try {
+          const r = await fetch("/api/board/update-card", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ project: proj, boardId, cardId, status: newStatus }),
+          });
+          if (r.ok) modal.remove();
+          else { const e = await r.json().catch(() => ({})); errEl.style.display = ""; errEl.textContent = "Update failed: " + (e.error || r.status); saveBtn.disabled = false; }
+        } catch (e) { errEl.style.display = ""; errEl.textContent = "Update failed: " + e; saveBtn.disabled = false; }
+      }
     });
   }
 
@@ -285,34 +351,17 @@
       const addBtn = target.closest(".card-col-add");
       if (addBtn) {
         const status = addBtn.getAttribute("data-status");
-        const title = prompt("Card title:");
-        if (!title || !title.trim()) return;
-        const body = prompt("Body (optional):") || "";
-        try {
-          const r = await fetch("/api/board/create-card", {
-            method: "POST", headers: { "content-type": "application/json" },
-            body: JSON.stringify({ project: proj, boardId, title: title.trim(), body, status }),
-          });
-          if (!r.ok) { const e = await r.json().catch(() => ({})); alert("create failed: " + (e.error || r.status)); }
-        } catch (e) { alert("create failed: " + e); }
+        openCardModal({ project: proj, boardId, status });
         return;
       }
 
       const card = target.closest(".card-item");
       if (card) {
         const cardId = card.getAttribute("data-card-id");
-        const curTitle = card.querySelector(".card-item-title")?.textContent || "";
-        const curBody = card.querySelector(".card-item-body")?.textContent || "";
         const curStatus = card.querySelector(".card-item-status")?.textContent || "";
-        const newStatus = prompt(`Move to status (current: ${curStatus}):`, curStatus);
-        if (newStatus === null) return;
-        try {
-          const r = await fetch("/api/board/update-card", {
-            method: "POST", headers: { "content-type": "application/json" },
-            body: JSON.stringify({ project: proj, boardId, cardId, status: newStatus.trim() || curStatus }),
-          });
-          if (!r.ok) { const e = await r.json().catch(() => ({})); alert("update failed: " + (e.error || r.status)); }
-        } catch (e) { alert("update failed: " + e); }
+        const boardEl = card.closest("[data-board-id]");
+        const statuses = [...(boardEl?.querySelectorAll(".card-col") || [])].map((c) => c.getAttribute("data-status")).filter(Boolean);
+        openCardModal({ project: proj, boardId, cardId, curStatus, statuses });
       }
     });
   }
@@ -398,7 +447,13 @@
         else { const e = await r.json().catch(() => ({})); errEl.style.display = ""; errEl.textContent = "Save failed: " + (e.error || r.status); saveBtn.disabled = false; }
       } catch (e) { errEl.style.display = ""; errEl.textContent = "Save failed: " + e; saveBtn.disabled = false; }
     });
-    setTimeout(() => document.addEventListener("click", (ev) => { if (!pop.contains(ev.target)) pop.remove(); }, { once: true }), 0);
+    function _outerClickColPop(ev) {
+      if (!pop.contains(ev.target)) {
+        pop.remove();
+        document.removeEventListener("click", _outerClickColPop, true);
+      }
+    }
+    setTimeout(() => document.addEventListener("click", _outerClickColPop, true), 0);
   }
 
   // ---------- Plan search ----------
@@ -413,12 +468,18 @@
     kanban.before(input);
     input.addEventListener("input", () => {
       const q = input.value.trim().toLowerCase();
+      try { if (q) sessionStorage.setItem("wp:plan-search", q); else sessionStorage.removeItem("wp:plan-search"); } catch {}
       document.querySelectorAll(".plan-card").forEach((card) => {
         const title = (card.querySelector(".plan-title")?.textContent || "").toLowerCase();
         card.style.display = !q || title.includes(q) ? "" : "none";
       });
       updateColumnCounts();
     });
+    // Restore session filter
+    try {
+      const saved = sessionStorage.getItem("wp:plan-search");
+      if (saved) { input.value = saved; input.dispatchEvent(new Event("input")); }
+    } catch {}
   }
 
   // ---------- Custom tab block comments ----------
@@ -438,15 +499,19 @@
       btn.className = "comment-btn";
       btn.setAttribute("data-comment-for", block.getAttribute("data-block-id") || "");
       btn.textContent = block.getAttribute("data-has-comment") === "true" ? "edit comment" : "+ comment";
+      const _existingText = block.getAttribute("data-comment-text") || "";
+      if (_existingText) btn.setAttribute("data-comment-text", _existingText);
       toolbar.appendChild(btn);
       block.appendChild(toolbar);
     });
-    panel.addEventListener("click", (ev) => {
+    if (panel._tabCommentListener) panel.removeEventListener("click", panel._tabCommentListener);
+    panel._tabCommentListener = (ev) => {
       const btn = ev.target instanceof HTMLElement ? ev.target.closest(".comment-btn") : null;
       if (!btn) return;
       const blockId = btn.getAttribute("data-comment-for");
       if (blockId) openTabCommentPopover(tabId, blockId, btn);
-    });
+    };
+    panel.addEventListener("click", panel._tabCommentListener);
   }
 
   function openTabCommentPopover(tabId, blockId, triggerBtn) {
@@ -508,9 +573,13 @@
         } else { const e = await r.json().catch(() => ({})); alert("save failed: " + (e.error || r.status)); saveBtn.disabled = false; }
       } catch (e) { alert("save failed: " + e); saveBtn.disabled = false; }
     });
-    setTimeout(() => document.addEventListener("click", (ev) => {
-      if (!pop.contains(ev.target) && !ev.target?.closest?.(".comment-btn")) pop.remove();
-    }, { once: true }), 0);
+    function _outerClickTabPop(ev) {
+      if (!pop.contains(ev.target) && !ev.target?.closest?.(".comment-btn")) {
+        pop.remove();
+        document.removeEventListener("click", _outerClickTabPop, true);
+      }
+    }
+    setTimeout(() => document.addEventListener("click", _outerClickTabPop, true), 0);
   }
 
   // ---------- New Tab ("+") button ----------
@@ -628,11 +697,12 @@
         const data = await r.json().catch(() => ({}));
         if (!r.ok) { showError("Create failed: " + (data.error || r.status)); saveBtn.disabled = false; saveBtn.textContent = "Create with AI"; statusEl.hidden = true; return; }
         statusEl.textContent = data.queued ? "Queued — planner is busy. Tab will appear when ready." : "Planner is working… (page will reload when done)";
-        setTimeout(() => {
+        const _modalTid = setTimeout(() => {
           modal.remove();
-          alert("The planner didn't respond in 60 s — check the chat panel.");
+          (window.__showToast || alert)("The planner didn't respond in 60 s — check the chat panel.");
         }, 60000);
         modal.setAttribute("data-waiting", "1");
+        modal.setAttribute("data-timeout-id", String(_modalTid));
       } catch (e) { showError("Create failed: " + e); saveBtn.disabled = false; saveBtn.textContent = "Create with AI"; statusEl.hidden = true; }
     });
   }
@@ -651,20 +721,17 @@
   mountNewTabBtn();
 
   // ---------- SSE: layout:changed + tab.updated ----------
-  // Reuse the existing app.js EventSource? app.js owns one. To avoid two
-  // connections we listen to a custom event app.js dispatches, OR open
-  // a second EventSource. Simpler: second EventSource scoped to project.
-  const es = new EventSource("/api/stream");
-  es.onmessage = (ev) => {
-    let msg;
-    try { msg = JSON.parse(ev.data); } catch { return; }
+  // app.js owns the EventSource and dispatches 'wp:sse' CustomEvents.
+  // We listen here instead of opening a second connection.
+  window.addEventListener("wp:sse", (ev) => {
+    const msg = ev.detail;
     if (msg.type === "layout:changed" && msg.project === project) {
       if (page.getAttribute("data-active-tab") === "layout") loadLayout();
     }
     if (msg.type === "tab.updated" && msg.project === project) {
       const active = page.getAttribute("data-active-tab");
       if (active === msg.tabId) {
-        const tabEl = document.querySelector(`.tab[data-tab-id="${msg.tabId}"]`);
+        const tabEl = document.querySelector(`.tab[data-tab-id="${CSS.escape(msg.tabId)}"]`);
         if (tabEl) tabEl.click();
       }
     }
@@ -685,5 +752,27 @@
       const active = page.getAttribute("data-active-tab");
       if (active === msg.boardId) refetchActiveTab();
     }
-  };
+    if ((msg.type === "tab:comment:set" || msg.type === "tab:comment:cleared") && msg.project === project) {
+      const active = page.getAttribute("data-active-tab");
+      if (active === msg.tabId) {
+        const block = panel.querySelector(`[data-block-id="${CSS.escape(msg.blockId)}"]`);
+        if (block) {
+          const btn = panel.querySelector(`.comment-btn[data-comment-for="${CSS.escape(msg.blockId)}"]`);
+          if (msg.type === "tab:comment:set") {
+            block.setAttribute("data-has-comment", "true");
+            block.setAttribute("data-comment-text", msg.text || "");
+            if (btn) { btn.textContent = "edit comment"; btn.setAttribute("data-comment-text", msg.text || ""); }
+          } else {
+            block.removeAttribute("data-has-comment");
+            block.removeAttribute("data-comment-text");
+            if (btn) { btn.textContent = "+ comment"; btn.removeAttribute("data-comment-text"); }
+          }
+        }
+      }
+    }
+  });
+
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") document.querySelectorAll(".popover").forEach((p) => p.remove());
+  });
 })();

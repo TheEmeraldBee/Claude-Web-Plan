@@ -23,18 +23,31 @@ export function Slideshow({ children }: SlideshowProps) {
     <div class="slideshow" data-slideshow="">
       <div class="slideshow-viewport">
         {slides.map((s, i) => (
-          <div class="slide" data-slide-index={i} aria-hidden={i !== 0 ? "true" : undefined} key={i}>
+          <div
+            class="slide"
+            data-slide-index={i}
+            data-slide-title={s.props.title || ""}
+            aria-hidden={i !== 0 ? "true" : "false"}
+            key={i}
+          >
             {s.props.title && <h3 class="slide-title">{s.props.title}</h3>}
             <div class="slide-body">{s.props.children}</div>
           </div>
         ))}
       </div>
+      <div class="slide-progress-bar">
+        <div class="slide-progress-fill" style={`width:${slides.length > 1 ? (1 / slides.length) * 100 : 100}%`}></div>
+      </div>
       <div class="slideshow-nav">
         <button type="button" class="slide-prev">←</button>
         <span class="slide-counter">
           <span class="slide-cur">1</span>{" / "}<span class="slide-total">{slides.length}</span>
+          {" "}<span class="slide-label"></span>
         </span>
-        <button type="button" class="slide-next">→</button>
+        <div class="slideshow-nav-right">
+          <button type="button" class="slide-fullscreen" title="Toggle fullscreen (F)">⛶</button>
+          <button type="button" class="slide-next">→</button>
+        </div>
       </div>
     </div>
   );

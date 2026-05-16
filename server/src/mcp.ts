@@ -56,6 +56,15 @@ function slugify(title: string): string {
   return title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60) || "plan";
 }
 
+function mergeKitImports(source: string, newNames: string[]): string {
+  const re = /^(import\s*\{)([^}]+)(\}\s*from\s*["']@web-planner\/kit["'];?)$/m;
+  const m = source.match(re);
+  if (!m) return source;
+  const existing = m[2].split(",").map((s) => s.trim()).filter(Boolean);
+  const merged = [...new Set([...existing, ...newNames])].sort().join(", ");
+  return source.replace(re, `${m[1]} ${merged} ${m[3]}`);
+}
+
 // ---------- tool schemas ----------
 
 const QuestionSchema = z.object({
@@ -85,6 +94,7 @@ const AppendBlockSchema = z.object({
   plan_id: z.string(),
   source: z.string().min(1),
   after_block_id: z.string().optional(),
+  imports: z.array(z.string()).optional(),
 });
 
 const SetStatusSchema = z.object({
@@ -214,6 +224,7 @@ interface CheckItem {
   ok: boolean;
   error?: string;
   block_ids?: string[];
+  mermaid_errors?: import("./compile.js").MermaidError[];
 }
 
 // ---------- defaults ----------
@@ -325,8 +336,10 @@ async function callToolImpl(name: string, args: unknown): Promise<{ content: { t
       if (rec.meta.status === "implemented") return err("plan_frozen");
       const appendedIds = blockIdsIn(a.source);
       if (appendedIds.length === 0) return err("appended_source_missing_block: append_block source must contain at least one <Block id=\"…\">…</Block>");
+      let base = rec.source;
+      if (a.imports && a.imports.length > 0) base = mergeKitImports(base, a.imports);
       let next: string;
-      try { next = appendBlock(rec.source, a.source, a.after_block_id); }
+      try { next = appendBlock(base, a.source, a.after_block_id); }
       catch (e) { return err(e instanceof Error ? e.message : String(e)); }
       try { validatePlanSource(next); }
       catch (e) { return err(e instanceof Error ? e.message : String(e)); }
@@ -611,7 +624,9 @@ ${planItems(done)}
         invalidate(path);
         try {
           const r = await compilePlanFile(path);
-          items.push({ kind: "plan", id: p.id, ok: true, block_ids: r.blockIds });
+          const item: CheckItem = { kind: "plan", id: p.id, ok: true, block_ids: r.blockIds };
+          if (r.mermaidErrors.length > 0) { item.ok = false; item.mermaid_errors = r.mermaidErrors; }
+          items.push(item);
         } catch (e) {
           items.push({ kind: "plan", id: p.id, ok: false, error: formatCompileError(e) });
         }
@@ -621,7 +636,9 @@ ${planItems(done)}
         invalidate(path);
         try {
           const r = await compilePlanFile(path);
-          items.push({ kind: "tab", id: t.id, ok: true, block_ids: r.blockIds });
+          const item: CheckItem = { kind: "tab", id: t.id, ok: true, block_ids: r.blockIds };
+          if (r.mermaidErrors.length > 0) { item.ok = false; item.mermaid_errors = r.mermaidErrors; }
+          items.push(item);
         } catch (e) {
           items.push({ kind: "tab", id: t.id, ok: false, error: formatCompileError(e) });
         }
@@ -656,7 +673,7 @@ const TOOLS = [
   { name: "ask_user", description: "Push structured questions to the browser; block until the user submits. Times out cleanly.", inputSchema: { type: "object", properties: { questions: { type: "array" }, timeout_seconds: { type: "number" } }, required: ["questions"] } },
   { name: "create_plan", description: "Submit a full .plan.tsx source. Server validates structure + block ids and dry-compiles before persisting; on compile_failed the plan is NOT saved.", inputSchema: { type: "object", properties: { title: { type: "string" }, source: { type: "string" }, project: { type: "string" } }, required: ["title","source"] } },
   { name: "update_block", description: "Replace one <Block id='...'> in a plan. Replacement MUST be exactly one <Block> with the same id. Server dry-compiles the resulting plan; rejected on implemented plans.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, block_id: { type: "string" }, replacement: { type: "string" }, project: { type: "string" } }, required: ["plan_id","block_id","replacement"] } },
-  { name: "append_block", description: "Insert one or more new <Block>s after an existing one (or before </Plan>). Server dry-compiles before persisting.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, source: { type: "string" }, after_block_id: { type: "string" }, project: { type: "string" } }, required: ["plan_id","source"] } },
+  { name: "append_block", description: "Insert one or more new <Block>s after an existing one (or before </Plan>). Optionally pass imports[] with component names to merge into the plan's @web-planner/kit import line (avoids needing to recreate the plan just to add an import). Server dry-compiles before persisting.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, source: { type: "string" }, after_block_id: { type: "string" }, imports: { type: "array", items: { type: "string" } }, project: { type: "string" } }, required: ["plan_id","source"] } },
   { name: "register_component", description: "Append a Preact component to the project's components.tsx for use as a new block kind. You must then import it in your plan/tab source.", inputSchema: { type: "object", properties: { name: { type: "string" }, source: { type: "string" }, project: { type: "string" } }, required: ["name","source"] } },
   { name: "set_plan_status", description: "Move plan between proposed/approved/implemented/abandoned. Implemented plans become read-only (but can still be delete_plan'd).", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, status: { type: "string" }, project: { type: "string" } }, required: ["plan_id","status"] } },
   { name: "set_state", description: "Override the implicit activity state (e.g. 'implementing' while running edits).", inputSchema: { type: "object", properties: { state: { type: "string" } }, required: ["state"] } },

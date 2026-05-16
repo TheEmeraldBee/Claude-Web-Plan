@@ -332,6 +332,114 @@
   @media (max-width: 720px) {
     .arch, .seq { grid-template-columns: 1fr; }
   }
+
+  /* ---- Planner active banner ---- */
+  .planner-active-banner {
+    background: linear-gradient(90deg, rgba(166,227,161,0.12), rgba(166,227,161,0.04));
+    border: 1px solid rgba(166,227,161,0.3);
+    border-left: 3px solid var(--green);
+    color: var(--green);
+    font-size: 0.84rem;
+    padding: 8px 14px;
+    border-radius: 6px;
+    margin-bottom: 20px;
+  }
+
+  /* ---- Toast notifications ---- */
+  .toast-container {
+    position: fixed; top: 20px; right: 20px;
+    display: flex; flex-direction: column; gap: 8px;
+    z-index: 9999; pointer-events: none;
+  }
+  .toast {
+    background: var(--surface0);
+    border: 1px solid var(--surface1);
+    color: var(--text);
+    padding: 10px 16px;
+    border-radius: 8px;
+    font-size: 0.88rem;
+    max-width: 320px;
+    opacity: 0;
+    transform: translateX(20px);
+    transition: opacity 0.2s, transform 0.2s;
+    pointer-events: auto;
+  }
+  .toast.toast-error {
+    background: rgba(243,139,168,0.12);
+    border-color: rgba(243,139,168,0.4);
+    color: var(--red);
+  }
+  .toast.toast-visible { opacity: 1; transform: none; }
+
+  /* ---- Help button ---- */
+  .help-btn {
+    position: fixed; bottom: 80px; left: 16px;
+    width: 32px; height: 32px;
+    background: var(--surface0);
+    border: 1px solid var(--surface1);
+    color: var(--subtext0);
+    border-radius: 50%;
+    font-size: 0.9rem; font-weight: 700;
+    cursor: pointer; z-index: 50;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .help-btn:hover { background: var(--surface1); color: var(--text); }
+
+  /* ---- Help panel ---- */
+  .help-panel {
+    position: fixed; bottom: 120px; left: 16px;
+    width: 320px; max-height: 70vh; overflow-y: auto;
+    background: var(--crust);
+    border: 1px solid var(--surface1);
+    border-radius: 10px;
+    padding: 16px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    z-index: 51;
+    font-size: 0.88rem;
+  }
+  .help-panel h6 {
+    margin: 0 0 12px;
+    color: var(--yellow);
+    font-size: 0.74rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .help-panel dl { margin: 0; }
+  .help-panel dt { color: var(--text); font-weight: 600; margin-top: 10px; }
+  .help-panel dd { color: var(--subtext0); margin: 2px 0 0 0; }
+  .help-panel code { font-size: 0.82em; }
+  .help-close {
+    margin-top: 14px; width: 100%;
+    background: var(--surface0); border: 1px solid var(--surface1);
+    color: var(--subtext0); border-radius: 6px;
+    padding: 6px; font-size: 0.84rem; cursor: pointer;
+  }
+  .help-close:hover { background: var(--surface1); color: var(--text); }
+
+  /* ---- Plans empty state ---- */
+  .plans-empty-state {
+    padding: 40px 24px;
+    text-align: center;
+    color: var(--subtext0);
+  }
+  .plans-empty-title {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--text);
+    margin: 0 0 8px;
+  }
+  .plans-empty-cmd {
+    background: var(--mantle);
+    border: 1px solid var(--surface0);
+    border-radius: 6px;
+    padding: 10px 16px;
+    font-family: ui-monospace, monospace;
+    font-size: 0.88rem;
+    color: var(--peach);
+    display: inline-block;
+    margin: 8px 0;
+    text-align: left;
+  }
 </style>
 </head>
 <body data-status="proposed">

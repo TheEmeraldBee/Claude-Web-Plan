@@ -14,6 +14,7 @@ interface CacheEntry {
   html: string;
   hasMermaid: boolean;
   blockIds: string[];
+  mermaidErrors: MermaidError[];
 }
 
 const cache = new Map<string, CacheEntry>();
@@ -23,10 +24,17 @@ function kitDir(): string {
   return resolve(__dirname, "..", "..", "kit", "src");
 }
 
+export interface MermaidError {
+  blockId: string;
+  diagram: string;
+  error: string;
+}
+
 export interface CompileResult {
   html: string;
   hasMermaid: boolean;
   blockIds: string[];
+  mermaidErrors: MermaidError[];
 }
 
 export interface CompileErrorDetail {
@@ -55,6 +63,28 @@ interface EsbuildBuildFailureShape {
   message?: string;
 }
 
+const VALID_MERMAID_TYPES = /^(graph|flowchart|sequenceDiagram|classDiagram|stateDiagram(-v2)?|erDiagram|gantt|journey|gitGraph|pie|quadrantChart|requirementDiagram|C4(Context|Container|Component|Dynamic|Deployment)|mindmap|timeline|sankey-beta|xychart-beta|block-beta|packet-beta|architecture-beta|kanban)\b/i;
+
+function validateMermaidBlocks(html: string): MermaidError[] {
+  const errors: MermaidError[] = [];
+  const blockRe = /<section[^>]+data-block-id="([^"]+)"[^>]*>([\s\S]*?)<\/section>/g;
+  let bm: RegExpExecArray | null;
+  while ((bm = blockRe.exec(html)) !== null) {
+    const blockId = bm[1]!;
+    const blockHtml = bm[2]!;
+    const mermaidRe = /<pre[^>]+data-mermaid[^>]*>([\s\S]*?)<\/pre>/g;
+    let mm: RegExpExecArray | null;
+    while ((mm = mermaidRe.exec(blockHtml)) !== null) {
+      const raw = mm[1]!.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&#\d+;/g, "").trim();
+      const firstToken = raw.split(/[\s\n]/)[0] || "";
+      if (firstToken && !VALID_MERMAID_TYPES.test(firstToken)) {
+        errors.push({ blockId, diagram: firstToken, error: `Unrecognised Mermaid diagram type "${firstToken}". Check spelling or use a supported type.` });
+      }
+    }
+  }
+  return errors;
+}
+
 function isBuildFailure(e: unknown): e is EsbuildBuildFailureShape {
   return !!e && typeof e === "object" && Array.isArray((e as { errors?: unknown }).errors);
 }
@@ -81,7 +111,7 @@ export async function compilePlanFile(planSourcePath: string): Promise<CompileRe
   const stat = statSync(planSourcePath);
   const cached = cache.get(planSourcePath);
   if (cached && cached.mtimeMs === stat.mtimeMs) {
-    return { html: cached.html, hasMermaid: cached.hasMermaid, blockIds: cached.blockIds };
+    return { html: cached.html, hasMermaid: cached.hasMermaid, blockIds: cached.blockIds, mermaidErrors: cached.mermaidErrors };
   }
 
   const tmp = mkdtempSync(join(tmpdir(), "web-planner-compile-"));
@@ -146,10 +176,11 @@ export async function compilePlanFile(planSourcePath: string): Promise<CompileRe
     }
     const hasMermaid = /data-mermaid/.test(html);
     const blockIds = Array.from(html.matchAll(/data-block-id="([^"]+)"/g)).map((m) => m[1] as string);
+    const mermaidErrors = hasMermaid ? validateMermaidBlocks(html) : [];
 
-    const entry: CacheEntry = { mtimeMs: stat.mtimeMs, html, hasMermaid, blockIds };
+    const entry: CacheEntry = { mtimeMs: stat.mtimeMs, html, hasMermaid, blockIds, mermaidErrors };
     cache.set(planSourcePath, entry);
-    return { html, hasMermaid, blockIds };
+    return { html, hasMermaid, blockIds, mermaidErrors };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

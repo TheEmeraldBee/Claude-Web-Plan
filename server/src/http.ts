@@ -261,9 +261,9 @@ async function handlePlanPage(_req: IncomingMessage, res: ServerResponse, projec
 }
 
 function decorateWithNotes(html: string, notes: Record<string, string>): string {
-  // Tag <section class="block" data-block-id="X"> with data-has-comment="true" when notes[X] exists.
   return html.replace(/<section\s+class="block"\s+data-block-id="([^"]+)"/g, (m, id: string) => {
-    return notes[id] ? `${m} data-has-comment="true"` : m;
+    if (!notes[id]) return m;
+    return `${m} data-has-comment="true" data-comment-text="${escapeHtml(notes[id])}"`;
   });
 }
 
@@ -316,7 +316,13 @@ async function renderBuiltinTab(project: string, tabId: string): Promise<string>
       { status: "implemented", label: "Implemented" },
       { status: "abandoned", label: "Abandoned" },
     ];
-    const empty = plans.length === 0 ? `<p class="muted">No plans yet. Drag here once the planner creates one.</p>` : "";
+    const empty = plans.length === 0 ? `
+      <div class="plans-empty-state">
+        <p class="plans-empty-title">No plans yet</p>
+        <p class="muted">Start by typing this in your Claude Code terminal:</p>
+        <pre class="plans-empty-cmd">/web-plan describe what you want to plan</pre>
+        <p class="muted">The planner will ask you questions and build the first plan.</p>
+      </div>` : "";
     const column = (label: string, status: string) => {
       const items = plans.filter((p) => p.status === status);
       return `<section class="kanban-col" data-status="${escapeHtml(status)}">

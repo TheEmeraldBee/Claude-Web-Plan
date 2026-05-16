@@ -16,7 +16,7 @@
       <div class="chat-box">
         <textarea placeholder="Message the planner…"></textarea>
         <div class="row">
-          <span class="state-name" style="font-size:.78rem;color:var(--subtext0);">⏎ send · / focus</span>
+          <span class="state-name" style="font-size:.78rem;color:var(--subtext0);">↵ send &nbsp; Shift+↵ newline &nbsp; / focus</span>
           <button type="button">Send</button>
         </div>
         <div class="chat-hint" hidden></div>
@@ -44,17 +44,42 @@
   function setCollapsed(collapsed) {
     chrome.classList.toggle("collapsed", collapsed);
     pillBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    try { localStorage.setItem("wp:chat-collapsed", collapsed ? "1" : "0"); } catch {}
   }
-  setCollapsed(window.innerWidth < NARROW);
+  const _savedCollapse = (() => { try { return localStorage.getItem("wp:chat-collapsed"); } catch { return null; } })();
+  setCollapsed(_savedCollapse !== null ? _savedCollapse === "1" : window.innerWidth < NARROW);
   pillBtn.addEventListener("click", () => {
     setCollapsed(!chrome.classList.contains("collapsed"));
     if (!chrome.classList.contains("collapsed")) chatArea.focus();
   });
 
+  let _activeTimer = null;
+  let _activeStart = 0;
+
   function setStateUi(value) {
     const kind = (value && value.kind) || "idle";
     pillDot.className = "state-dot state-dot-" + kind;
-    pillName.textContent = kind;
+    if (_activeTimer) { clearInterval(_activeTimer); _activeTimer = null; }
+    const IDLE_STATES = ["idle", "waiting"];
+    if (IDLE_STATES.includes(kind)) {
+      pillName.textContent = kind;
+      document.querySelector(".planner-active-banner")?.remove();
+    } else {
+      _activeStart = Date.now();
+      const update = () => {
+        const s = Math.round((Date.now() - _activeStart) / 1000);
+        pillName.textContent = s > 0 ? kind + " " + s + "s…" : kind;
+      };
+      update();
+      _activeTimer = setInterval(update, 1000);
+      if (PLAN && !document.querySelector(".planner-active-banner")) {
+        const banner = document.createElement("div");
+        banner.className = "planner-active-banner";
+        banner.textContent = "Planner is working on this plan…";
+        const planEl = document.querySelector(".plan");
+        if (planEl) planEl.insertBefore(banner, planEl.firstChild);
+      }
+    }
   }
 
   // ---------- SSE ----------
@@ -62,6 +87,7 @@
   es.onmessage = (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
+    window.dispatchEvent(new CustomEvent("wp:sse", { detail: msg }));
     if (msg.type === "state") setStateUi(msg.value);
     if (msg.type === "ask_user:open") openAskModal(msg.id, msg.payload);
     if (msg.type === "comment:set" && PLAN && msg.planId === PLAN.id) reflectComment(msg.blockId);
@@ -163,6 +189,9 @@
         toolbar.appendChild(btn);
         panel.appendChild(toolbar);
       });
+      // Block contains tabs: hide the redundant block-level comment button
+      const parentToolbar = block.querySelector(":scope > .block-toolbar");
+      if (parentToolbar) parentToolbar.style.display = "none";
     });
   }
 
@@ -281,7 +310,7 @@
     tabs.querySelectorAll(".plan-tab-panel").forEach((p) => {
       const isTarget = p.getAttribute("data-tab-id") === targetId;
       p.hidden = !isTarget;
-      if (!isTarget) p.querySelectorAll(".block-toolbar").forEach((t) => t.remove());
+      p.querySelectorAll(".block-toolbar").forEach((t) => { t.style.display = isTarget ? "" : "none"; });
     });
   });
 
@@ -291,23 +320,57 @@
     if (slides.length === 0) return;
     const prevBtn = sw.querySelector(".slide-prev");
     const nextBtn = sw.querySelector(".slide-next");
+    const fsBtn = sw.querySelector(".slide-fullscreen");
     const curEl = sw.querySelector(".slide-cur");
+    const labelEl = sw.querySelector(".slide-label");
+    const fillEl = sw.querySelector(".slide-progress-fill");
     let current = 0;
     function goTo(n) {
       slides[current].setAttribute("aria-hidden", "true");
       current = Math.max(0, Math.min(n, slides.length - 1));
-      slides[current].removeAttribute("aria-hidden");
+      const slide = slides[current];
+      slide.setAttribute("aria-hidden", "false");
+      slide.classList.remove("slide-entering");
+      void slide.offsetWidth;
+      slide.classList.add("slide-entering");
       if (curEl) curEl.textContent = String(current + 1);
+      if (labelEl) {
+        const t = slide.getAttribute("data-slide-title") || "";
+        labelEl.textContent = t.length > 28 ? t.slice(0, 28) + "…" : t;
+      }
+      if (fillEl) fillEl.style.width = ((current + 1) / slides.length * 100) + "%";
       if (prevBtn) prevBtn.disabled = current === 0;
       if (nextBtn) nextBtn.disabled = current === slides.length - 1;
     }
-    slides.forEach((s, i) => { if (i !== 0) s.setAttribute("aria-hidden", "true"); else s.removeAttribute("aria-hidden"); });
+    slides.forEach((s, i) => { s.setAttribute("aria-hidden", i !== 0 ? "true" : "false"); });
+    if (fillEl) fillEl.style.width = (1 / slides.length * 100) + "%";
+    if (labelEl && slides[0]) {
+      const t = slides[0].getAttribute("data-slide-title") || "";
+      labelEl.textContent = t.length > 28 ? t.slice(0, 28) + "…" : t;
+    }
     if (prevBtn) { prevBtn.disabled = true; prevBtn.addEventListener("click", () => goTo(current - 1)); }
     if (nextBtn) { nextBtn.disabled = slides.length <= 1; nextBtn.addEventListener("click", () => goTo(current + 1)); }
+    if (fsBtn) fsBtn.addEventListener("click", () => sw.classList.toggle("fullscreen"));
+    try {
+      if (!sessionStorage.getItem("wp:slide-hint-seen")) {
+        const hint = document.createElement("div");
+        hint.className = "slide-hint";
+        hint.textContent = "← → to navigate · F for fullscreen";
+        sw.querySelector(".slideshow-viewport")?.appendChild(hint);
+        setTimeout(() => { hint.classList.add("fade-out"); setTimeout(() => hint.remove(), 500); }, 2800);
+        sessionStorage.setItem("wp:slide-hint-seen", "1");
+      }
+    } catch {}
   }
   document.querySelectorAll("[data-slideshow]").forEach(initSlideshow);
   document.addEventListener("keydown", (ev) => {
     if (ev.target instanceof HTMLInputElement || ev.target instanceof HTMLTextAreaElement) return;
+    if (ev.key === "Escape") {
+      const fs = document.querySelector(".slideshow.fullscreen");
+      if (fs) { fs.classList.remove("fullscreen"); return; }
+      document.querySelectorAll(".popover").forEach((p) => p.remove());
+      return;
+    }
     const sw = document.querySelector("[data-slideshow]");
     if (!sw) return;
     if (ev.key === "ArrowRight") { ev.preventDefault(); sw.querySelector(".slide-next")?.click(); }
@@ -734,4 +797,61 @@
     });
     return ans;
   }
+
+  // ---------- Toast notifications (replaces alert()) ----------
+  function showToast(text, kind) {
+    let container = document.querySelector(".toast-container");
+    if (!container) {
+      container = document.createElement("div");
+      container.className = "toast-container";
+      document.body.appendChild(container);
+    }
+    const toast = document.createElement("div");
+    toast.className = "toast" + (kind === "error" ? " toast-error" : "");
+    toast.textContent = text;
+    container.appendChild(toast);
+    setTimeout(() => toast.classList.add("toast-visible"), 10);
+    setTimeout(() => {
+      toast.classList.remove("toast-visible");
+      setTimeout(() => toast.remove(), 300);
+    }, 5000);
+  }
+  window.__showToast = showToast;
+
+  // ---------- Help button ----------
+  function mountHelpBtn() {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "help-btn";
+    btn.textContent = "?";
+    btn.title = "Help";
+    btn.addEventListener("click", toggleHelpPanel);
+    document.body.appendChild(btn);
+  }
+  function toggleHelpPanel() {
+    const existing = document.querySelector(".help-panel");
+    if (existing) { existing.remove(); return; }
+    const panel = document.createElement("div");
+    panel.className = "help-panel";
+    panel.innerHTML = `
+      <h6>How to use web-planner</h6>
+      <dl>
+        <dt>Create a plan</dt>
+        <dd>Type <code>/web-plan your brief</code> in Claude Code to start a new plan.</dd>
+        <dt>Comment on a block</dt>
+        <dd>Click <strong>+ comment</strong> on any block to leave a note for the planner.</dd>
+        <dt>Send feedback</dt>
+        <dd>After commenting, click <strong>Send feedback to planner</strong> to wake the agent.</dd>
+        <dt>Chat with planner</dt>
+        <dd>Type in the chat box (lower right) and press <strong>&#x23CE;</strong> to send.</dd>
+        <dt>Keyboard shortcuts</dt>
+        <dd><code>/</code> &mdash; focus chat &nbsp; <code>&#x23CE;</code> &mdash; send &nbsp; <code>Shift+&#x23CE;</code> &mdash; new line</dd>
+        <dd><code>&#x2190;</code> / <code>&#x2192;</code> &mdash; prev/next slide &nbsp; <code>F</code> &mdash; fullscreen</dd>
+      </dl>
+      <button type="button" class="help-close">Close</button>
+    `;
+    document.body.appendChild(panel);
+    panel.querySelector(".help-close").addEventListener("click", () => panel.remove());
+  }
+  mountHelpBtn();
 })();
