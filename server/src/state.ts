@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-export type ActivityKind = "idle" | "thinking" | "asking" | "waiting" | "implementing" | "errored";
+export type ActivityKind = string;
 
 export interface PendingMessage { kind: "message"; resolve: (text: string) => void; }
 export interface PendingAsk {
@@ -27,6 +27,7 @@ export interface Subscriber {
 export interface ActivityState {
   kind: ActivityKind;
   since: number;
+  color?: string;
   pendingId?: string;
   detail?: unknown;
 }

@@ -288,34 +288,60 @@
     modal.innerHTML = `
       <h6>${isEdit ? "Edit card" : "New card"}</h6>
       ${!isEdit ? `<input type="text" class="card-title-input" placeholder="Card title…" style="${INPUT_S}margin-bottom:8px;" />` : ""}
-      ${!isEdit ? `<textarea class="card-body-input" rows="2" placeholder="Body (optional)…" style="${INPUT_S}resize:vertical;margin-bottom:8px;"></textarea>` : ""}
+      ${!isEdit ? `<textarea class="card-brief-input" rows="2" placeholder="Brief (optional — adds AI-authored content)…" style="${INPUT_S}resize:vertical;margin-bottom:8px;"></textarea>` : ""}
       ${isEdit ? `<label style="font-size:0.85rem;color:var(--subtext0);margin-bottom:4px;display:block;">Move to status</label>` : ""}
       <select class="card-status-input" style="${INPUT_S}margin-bottom:8px;">${statusOpts}</select>
       <div class="modal-error" style="display:none;color:var(--red);font-size:0.84rem;margin-bottom:6px;"></div>
       <div class="row" style="margin-top:8px;">
         <button type="button" class="cancel">Cancel</button>
-        <button type="button" class="save">${isEdit ? "Update" : "Add card"}</button>
+        ${!isEdit ? `<button type="button" class="save-plain">Add card</button>` : ""}
+        <button type="button" class="save">${isEdit ? "Update" : "Add with AI ✦"}</button>
       </div>`;
     document.body.appendChild(modal);
     const errEl = modal.querySelector(".modal-error");
     if (!isEdit) modal.querySelector(".card-title-input").focus();
     modal.querySelector(".cancel").addEventListener("click", () => modal.remove());
+    function _outerClickCardModal(ev) {
+      if (!modal.contains(ev.target)) { modal.remove(); document.removeEventListener("click", _outerClickCardModal, true); }
+    }
+    setTimeout(() => document.addEventListener("click", _outerClickCardModal, true), 0);
+
+    const plainBtn = modal.querySelector(".save-plain");
+    if (plainBtn) {
+      plainBtn.addEventListener("click", async () => {
+        const newStatus = modal.querySelector(".card-status-input").value;
+        const title = (modal.querySelector(".card-title-input")?.value || "").trim();
+        if (!title) { errEl.style.display = ""; errEl.textContent = "Title is required."; return; }
+        const brief = modal.querySelector(".card-brief-input")?.value || "";
+        plainBtn.disabled = true;
+        try {
+          const r = await fetch("/api/board/create-card", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ project: proj, boardId, title, body: brief, status: newStatus }),
+          });
+          if (r.ok) modal.remove();
+          else { const e = await r.json().catch(() => ({})); errEl.style.display = ""; errEl.textContent = "Create failed: " + (e.error || r.status); plainBtn.disabled = false; }
+        } catch (e) { errEl.style.display = ""; errEl.textContent = "Create failed: " + e; plainBtn.disabled = false; }
+      });
+    }
+
     modal.querySelector(".save").addEventListener("click", async () => {
       const newStatus = modal.querySelector(".card-status-input").value;
       const saveBtn = modal.querySelector(".save");
       if (!isEdit) {
         const title = (modal.querySelector(".card-title-input")?.value || "").trim();
         if (!title) { errEl.style.display = ""; errEl.textContent = "Title is required."; return; }
-        const body = modal.querySelector(".card-body-input")?.value || "";
-        saveBtn.disabled = true;
+        const brief = (modal.querySelector(".card-brief-input")?.value || "").trim() || title;
+        saveBtn.disabled = true; saveBtn.textContent = "Creating…";
         try {
-          const r = await fetch("/api/board/create-card", {
+          const r = await fetch("/api/create-card-stub", {
             method: "POST", headers: { "content-type": "application/json" },
-            body: JSON.stringify({ project: proj, boardId, title, body, status: newStatus }),
+            body: JSON.stringify({ project: proj, boardId, title, brief, status: newStatus }),
           });
-          if (r.ok) modal.remove();
-          else { const e = await r.json().catch(() => ({})); errEl.style.display = ""; errEl.textContent = "Create failed: " + (e.error || r.status); saveBtn.disabled = false; }
-        } catch (e) { errEl.style.display = ""; errEl.textContent = "Create failed: " + e; saveBtn.disabled = false; }
+          const data = await r.json().catch(() => ({}));
+          if (r.ok && data.url) { modal.remove(); location.href = data.url; }
+          else { errEl.style.display = ""; errEl.textContent = "Create failed: " + (data.error || r.status); saveBtn.disabled = false; saveBtn.textContent = "Add with AI ✦"; }
+        } catch (e) { errEl.style.display = ""; errEl.textContent = "Create failed: " + e; saveBtn.disabled = false; saveBtn.textContent = "Add with AI ✦"; }
       } else {
         if (newStatus === curStatus) { modal.remove(); return; }
         saveBtn.disabled = true;
@@ -355,13 +381,21 @@
         return;
       }
 
-      const card = target.closest(".card-item");
-      if (card) {
-        const cardId = card.getAttribute("data-card-id");
-        const curStatus = card.querySelector(".card-item-status")?.textContent || "";
-        const boardEl = card.closest("[data-board-id]");
-        const statuses = [...(boardEl?.querySelectorAll(".card-col") || [])].map((c) => c.getAttribute("data-status")).filter(Boolean);
-        openCardModal({ project: proj, boardId, cardId, curStatus, statuses });
+      const quickMove = target.closest(".card-quick-move");
+      if (quickMove) {
+        ev.preventDefault();
+        const cardId = quickMove.getAttribute("data-card-id");
+        const newStatus = quickMove.getAttribute("data-status");
+        quickMove.disabled = true;
+        try {
+          const r = await fetch("/api/board/update-card", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ project: proj, boardId, cardId, status: newStatus }),
+          });
+          if (r.ok) refetchActiveTab();
+          else { const e = await r.json().catch(() => ({})); (window.__showToast || alert)("move failed: " + (e.error || r.status)); quickMove.disabled = false; }
+        } catch (e) { (window.__showToast || alert)("move failed: " + e); quickMove.disabled = false; }
+        return;
       }
     });
   }

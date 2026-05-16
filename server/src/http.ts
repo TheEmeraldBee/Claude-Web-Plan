@@ -88,6 +88,9 @@ ${hasMermaid ? `<script type="module">
   window.__renderMermaid = renderMermaid;
 </script>` : ""}
 </head><body><div class="page">${body}</div>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1/plugins/autoloader/prism-autoloader.min.js"></script>
+<script>Prism.plugins.autoloader.languages_path = "https://cdn.jsdelivr.net/npm/prismjs@1/components/";</script>
 <script type="module" src="/ui/app.js"></script>
 ${extraScripts}
 </body></html>`;
@@ -409,12 +412,24 @@ function renderBoardTab(project: string, boardId: string): string {
   if (!board) return `<p class="muted">Board not found: ${escapeHtml(boardId)}</p>`;
   const cols = board.statuses.map((status) => {
     const cards = board.cards.filter((c) => c.status === status);
-    const cardHtml = cards.map((c) => `
+    const cardHtml = cards.map((c) => {
+      const cardUrl = `/boards/${encodeURIComponent(project)}/${encodeURIComponent(boardId)}/cards/${encodeURIComponent(c.id)}`;
+      const otherStatuses = board.statuses.filter((s) => s !== status);
+      const quickMoveOpts = otherStatuses.map((s) =>
+        `<button type="button" class="card-quick-move" data-card-id="${escapeHtml(c.id)}" data-board-id="${escapeHtml(boardId)}" data-project="${escapeHtml(project)}" data-status="${escapeHtml(s)}">${escapeHtml(s)}</button>`
+      ).join("");
+      return `
       <div class="card-item" data-card-id="${escapeHtml(c.id)}" data-board-id="${escapeHtml(boardId)}" data-project="${escapeHtml(project)}">
-        <div class="card-item-title">${escapeHtml(c.title)}</div>
-        ${c.body ? `<div class="card-item-body">${escapeHtml(c.body)}</div>` : ""}
-        <span class="card-item-status">${escapeHtml(status)}</span>
-      </div>`).join("");
+        <a class="card-item-link" href="${cardUrl}">
+          <div class="card-item-title">${escapeHtml(c.title)}</div>
+          ${c.body ? `<div class="card-item-body">${escapeHtml(c.body)}</div>` : ""}
+        </a>
+        <div class="card-item-footer">
+          <span class="card-item-status">${escapeHtml(status)}</span>
+          ${otherStatuses.length > 0 ? `<div class="card-quick-move-wrap">${quickMoveOpts}</div>` : ""}
+        </div>
+      </div>`;
+    }).join("");
     return `<div class="card-col" data-status="${escapeHtml(status)}">
       <header class="card-col-head">
         <h4>${escapeHtml(status)}</h4>
@@ -586,6 +601,112 @@ async function handleBoardUpdateStatuses(req: IncomingMessage, res: ServerRespon
   }
 }
 
+const CARD_STUB_SOURCE = (title: string, body: string) =>
+  `import { Plan, Block, Callout } from "@web-planner/kit";\n\nexport default () => (\n  <Plan title="${title.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}" status="proposed">\n    <Block id="b-brief" kind="summary">\n      <Callout>${body.replace(/[<>&]/g, (c: string) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]!))}</Callout>\n    </Block>\n  </Plan>\n);\n`;
+
+async function handleCardPage(_req: IncomingMessage, res: ServerResponse, project: string, boardId: string, cardId: string) {
+  const board = storage.readCardBoard(project, boardId);
+  if (!board) return send(res, 404, "board not found");
+  const card = board.cards.find((c) => c.id === cardId);
+  if (!card) return send(res, 404, "card not found");
+  const notes = storage.readCardNotes(project, boardId, cardId);
+  let source = storage.readCardSource(project, boardId, cardId);
+  if (!source) {
+    source = CARD_STUB_SOURCE(card.title, card.body || card.title);
+    storage.writeCardSource(project, boardId, cardId, source);
+  }
+  const sourcePath = storage.cardSourcePath(project, boardId, cardId);
+  try {
+    const { html, hasMermaid } = await compilePlanFile(sourcePath);
+    const decorated = decorateWithNotes(html, notes);
+    const cardMeta = { id: cardId, boardId, project, title: card.title, status: card.status, statuses: board.statuses, notes };
+    const body = `<main class="card-page plan" data-card-id="${escapeHtml(cardId)}" data-board-id="${escapeHtml(boardId)}" data-project="${escapeHtml(project)}">
+      <header class="plan-header card-page-header">
+        <div>
+          <h1 class="card-page-title" contenteditable="true" data-card-title="${escapeHtml(card.title)}">${escapeHtml(card.title)}</h1>
+          <div class="card-page-meta">
+            <span class="card-status-pill" data-statuses="${escapeHtml(JSON.stringify(board.statuses))}">${escapeHtml(card.status)}</span>
+          </div>
+        </div>
+        <div class="plan-meta">
+          <a class="badge plan-back-btn" href="/projects/${encodeURIComponent(project)}?tab=${encodeURIComponent(boardId)}">← back to board</a>
+        </div>
+      </header>
+      ${decorated}
+    </main>`;
+    const cardScript = `<script>window.__CARD__ = ${JSON.stringify(cardMeta)};</script>`;
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(renderShell(card.title + " — " + board.title, body, hasMermaid, undefined, cardScript, project));
+  } catch (e) {
+    res.writeHead(500, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<pre>${escapeHtml(e instanceof Error ? e.message : String(e))}</pre>`);
+  }
+}
+
+async function handleCardComment(req: IncomingMessage, res: ServerResponse) {
+  const body = await readBody(req);
+  let parsed: { project?: string; boardId?: string; cardId?: string; blockId?: string; text?: string };
+  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
+  const { project, boardId, cardId, blockId, text } = parsed;
+  if (!project || !boardId || !cardId || !blockId || typeof text !== "string") return sendJson(res, 400, { error: "missing_fields" });
+  try {
+    storage.setCardComment(project, boardId, cardId, blockId, text);
+    const type = text === "" ? "card:comment:cleared" : "card:comment:set";
+    state.broadcast({ type, project, boardId, cardId, blockId, text });
+    sendJson(res, 200, { ok: true });
+  } catch (e) {
+    sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+async function handleCreateCardStub(req: IncomingMessage, res: ServerResponse) {
+  const body = await readBody(req);
+  let parsed: { project?: string; boardId?: string; title?: string; brief?: string; status?: string };
+  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
+  const { boardId, title, brief, status } = parsed;
+  const project = parsed.project || projectSlugFromCwd();
+  if (!boardId || !title || !brief) return sendJson(res, 400, { error: "missing_fields" });
+  const board = storage.readCardBoard(project, boardId);
+  if (!board) return sendJson(res, 404, { error: "board_not_found" });
+  const cardStatus = status && board.statuses.includes(status) ? status : board.statuses[0]!;
+  const card = storage.addCard(project, boardId, title, brief, cardStatus);
+  const source = CARD_STUB_SOURCE(title, brief);
+  storage.writeCardSource(project, boardId, card.id, source);
+  state.broadcast({ type: "board:changed", project, boardId });
+  const text = `[expand-card cardId=${card.id} boardId=${boardId}]\n${brief}`;
+  const r = state.enqueueOrDeliver({ text, kind: "chat", meta: { cardId: card.id, boardId, project } });
+  const url = `/boards/${encodeURIComponent(project)}/${encodeURIComponent(boardId)}/cards/${encodeURIComponent(card.id)}`;
+  sendJson(res, 200, { ok: true, cardId: card.id, url, queued: r.queued });
+}
+
+async function handleCardGenerateBlock(req: IncomingMessage, res: ServerResponse) {
+  const body = await readBody(req);
+  let parsed: { project?: string; boardId?: string; cardId?: string; prompt?: string };
+  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
+  const { boardId, cardId, prompt, project: proj } = parsed;
+  if (!boardId || !cardId || !prompt) return sendJson(res, 400, { error: "missing_fields" });
+  const project = proj || projectSlugFromCwd();
+  const text = `[generate-card-block cardId=${cardId} boardId=${boardId} project=${project}]\n${prompt}`;
+  const r = state.enqueueOrDeliver({ text, kind: "chat", meta: { cardId, boardId, project } });
+  sendJson(res, 200, { ok: true, queued: r.queued });
+}
+
+async function handleCardDelete(req: IncomingMessage, res: ServerResponse) {
+  const body = await readBody(req);
+  let parsed: { project?: string; boardId?: string; cardId?: string };
+  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
+  const { project, boardId, cardId } = parsed;
+  if (!project || !boardId || !cardId) return sendJson(res, 400, { error: "missing_fields" });
+  try {
+    storage.deleteCard(project, boardId, cardId);
+    storage.deleteCardFiles(project, boardId, cardId);
+    state.broadcast({ type: "board:changed", project, boardId });
+    sendJson(res, 200, { ok: true });
+  } catch (e) {
+    sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
 async function handleCreateTab(req: IncomingMessage, res: ServerResponse) {
   const body = await readBody(req);
   let parsed: { project?: string; title?: string; purpose?: string };
@@ -637,8 +758,15 @@ async function router(req: IncomingMessage, res: ServerResponse) {
     if (m === "POST" && url.pathname === "/api/board/delete-card") return handleBoardDeleteCard(req, res);
     if (m === "POST" && url.pathname === "/api/tab-comment") return handleTabComment(req, res);
     if (m === "POST" && url.pathname === "/api/create-tab") return handleCreateTab(req, res);
+    if (m === "POST" && url.pathname === "/api/card-comment") return handleCardComment(req, res);
+    if (m === "POST" && url.pathname === "/api/create-card-stub") return handleCreateCardStub(req, res);
+    if (m === "POST" && url.pathname === "/api/card-generate-block") return handleCardGenerateBlock(req, res);
+    if (m === "POST" && url.pathname === "/api/card-delete") return handleCardDelete(req, res);
     const ansMatch = url.pathname.match(/^\/api\/answer\/([\w-]+)$/);
     if (m === "POST" && ansMatch) return handleAnswer(req, res, ansMatch[1] as string);
+
+    const cardPageMatch = url.pathname.match(/^\/boards\/([^/]+)\/([^/]+)\/cards\/([^/]+)$/);
+    if (m === "GET" && cardPageMatch) return handleCardPage(req, res, cardPageMatch[1] as string, cardPageMatch[2] as string, cardPageMatch[3] as string);
 
     const planMatch = url.pathname.match(/^\/plans\/([^/]+)\/(.+)$/);
     if (m === "GET" && planMatch) return handlePlanPage(req, res, planMatch[1] as string, planMatch[2] as string);

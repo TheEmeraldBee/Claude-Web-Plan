@@ -3,6 +3,7 @@
 
 (function () {
   const PLAN = /** @type {{id:string, project:string, status:string, notes:Record<string,string>}|undefined} */ (window.__PLAN__);
+  const CARD = /** @type {{id:string, boardId:string, project:string, title:string, status:string, statuses:string[], notes:Record<string,string>}|undefined} */ (window.__CARD__);
 
   // ---------- State pill ----------
   function mountStatePill() {
@@ -40,18 +41,13 @@
     setTimeout(() => { chatHint.hidden = true; }, 4000);
   }
 
-  const NARROW = 760;
   function setCollapsed(collapsed) {
     chrome.classList.toggle("collapsed", collapsed);
     pillBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
-    try { localStorage.setItem("wp:chat-collapsed", collapsed ? "1" : "0"); } catch {}
   }
-  const _savedCollapse = (() => { try { return localStorage.getItem("wp:chat-collapsed"); } catch { return null; } })();
-  setCollapsed(_savedCollapse !== null ? _savedCollapse === "1" : window.innerWidth < NARROW);
-  pillBtn.addEventListener("click", () => {
-    setCollapsed(!chrome.classList.contains("collapsed"));
-    if (!chrome.classList.contains("collapsed")) chatArea.focus();
-  });
+  setCollapsed(true);
+  pillBtn.addEventListener("click", () => { setCollapsed(false); chatArea.focus(); });
+  chatArea.addEventListener("blur", () => { setTimeout(() => setCollapsed(true), 120); });
 
   let _activeTimer = null;
   let _activeStart = 0;
@@ -59,6 +55,7 @@
   function setStateUi(value) {
     const kind = (value && value.kind) || "idle";
     pillDot.className = "state-dot state-dot-" + kind;
+    pillDot.style.background = (value && value.color) ? value.color : "";
     if (_activeTimer) { clearInterval(_activeTimer); _activeTimer = null; }
     const IDLE_STATES = ["idle", "waiting"];
     if (IDLE_STATES.includes(kind)) {
@@ -154,6 +151,7 @@
       const oldBlock = document.querySelector('[data-block-id="' + cssEscape(blockId) + '"]');
       if (!newBlock || !oldBlock) { location.reload(); return; }
       oldBlock.replaceWith(newBlock);
+      if (window.Prism) window.Prism.highlightAllUnder(newBlock);
       if (PLAN && PLAN.notes && PLAN.notes[blockId]) reflectComment(blockId);
       // Re-apply tab panel comment indicators for any of this block's tab panels
       if (PLAN && PLAN.notes) {
@@ -398,6 +396,33 @@
     mountDeleteButton();
     mountBackButton();
     if (PLAN.status !== "implemented") mountAiBlockBtn();
+  }
+
+  if (CARD) {
+    const cardNotes = Object.assign({}, CARD.notes || {});
+    Object.keys(cardNotes).forEach(reflectCardComment);
+
+    document.addEventListener("click", (ev) => {
+      const target = ev.target;
+      if (!(target instanceof HTMLElement)) return;
+      const btn = target.closest(".comment-btn");
+      if (btn) {
+        const blockId = btn.getAttribute("data-comment-for");
+        if (blockId) openCardCommentPopover(blockId);
+      }
+    });
+
+    mountCardAiBlockBtn();
+    mountCardDeleteButton();
+    mountCardInlineTitleEdit();
+    mountCardStatusPill();
+
+    window.addEventListener("wp:sse", (ev) => {
+      const msg = ev.detail;
+      if (msg.type === "card:updated" && msg.project === CARD.project && msg.boardId === CARD.boardId && msg.cardId === CARD.id) {
+        location.reload();
+      }
+    });
   }
 
   // ---------- Copy buttons ----------
@@ -817,6 +842,171 @@
     }, 5000);
   }
   window.__showToast = showToast;
+
+  // ---------- Card page functions ----------
+  function reflectCardComment(blockId) {
+    const block = document.querySelector('[data-block-id="' + cssEscape(blockId) + '"]');
+    if (!block) return;
+    const btn = block.querySelector('.comment-btn[data-comment-for="' + cssEscape(blockId) + '"]');
+    if (btn) btn.textContent = "edit comment";
+    block.setAttribute("data-has-comment", "true");
+  }
+
+  function openCardCommentPopover(blockId) {
+    closePopover();
+    const block = document.querySelector('[data-block-id="' + cssEscape(blockId) + '"]');
+    if (!block) return;
+    const cardNotes = CARD.notes || {};
+    const existing = cardNotes[blockId] || "";
+    const pop = document.createElement("div");
+    pop.className = "popover";
+    pop.setAttribute("data-comment-block", blockId);
+    pop.innerHTML = `
+      <h6>comment on ${escapeHtml(blockId)}</h6>
+      ${existing ? `<div class="existing">${escapeHtml(existing)}</div>` : ""}
+      <textarea rows="2" placeholder="${existing ? "overwrite the comment…" : "add a comment…"}"></textarea>
+      <div class="row">
+        <button type="button" class="cancel">cancel</button>
+        ${existing ? `<button type="button" class="delete">delete</button>` : ""}
+        <button type="button" class="save">save</button>
+      </div>`;
+    document.body.appendChild(pop);
+    const rect = block.getBoundingClientRect();
+    pop.style.cssText = `position:absolute;top:${rect.bottom + window.scrollY + 8}px;left:${Math.min(rect.left + window.scrollX, window.innerWidth - 300)}px;`;
+    const ta = pop.querySelector("textarea");
+    ta && ta.focus();
+    pop.querySelector(".cancel").addEventListener("click", closePopover);
+    const delBtn = pop.querySelector(".delete");
+    if (delBtn) {
+      delBtn.addEventListener("click", async () => {
+        delBtn.disabled = true;
+        const r = await fetch("/api/card-comment", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ project: CARD.project, boardId: CARD.boardId, cardId: CARD.id, blockId, text: "" }),
+        });
+        if (r.ok) { delete (CARD.notes || {})[blockId]; block.removeAttribute("data-has-comment"); const btn = block.querySelector(".comment-btn"); if (btn) btn.textContent = "+ comment"; closePopover(); }
+        else { const e = await r.json().catch(() => ({})); alert("delete failed: " + (e.error || r.status)); delBtn.disabled = false; }
+      });
+    }
+    pop.querySelector(".save").addEventListener("click", async () => {
+      const text = ta ? ta.value.trim() : "";
+      if (!text) { closePopover(); return; }
+      const saveBtn = pop.querySelector(".save");
+      saveBtn.disabled = true;
+      const r = await fetch("/api/card-comment", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ project: CARD.project, boardId: CARD.boardId, cardId: CARD.id, blockId, text }),
+      });
+      if (r.ok) { CARD.notes = CARD.notes || {}; CARD.notes[blockId] = text; reflectCardComment(blockId); closePopover(); }
+      else { const e = await r.json().catch(() => ({})); alert("save failed: " + (e.error || r.status)); saveBtn.disabled = false; }
+    });
+    setTimeout(() => document.addEventListener("click", outsideClick, true), 0);
+  }
+
+  function mountCardAiBlockBtn() {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "ai-block-btn";
+    btn.textContent = "+ AI block";
+    btn.style.cssText = "position:fixed;bottom:80px;right:56px;";
+    btn.addEventListener("click", () => {
+      closePopover();
+      const pop = document.createElement("div");
+      pop.className = "popover";
+      pop.style.cssText = "position:fixed;bottom:130px;right:16px;width:360px;";
+      pop.innerHTML = `<h6>Add AI-generated block</h6>
+        <textarea rows="3" placeholder="Describe what you want…"></textarea>
+        <div class="row"><button type="button" class="cancel">Cancel</button><button type="button" class="save">Generate</button></div>`;
+      document.body.appendChild(pop);
+      const ta = pop.querySelector("textarea");
+      ta && ta.focus();
+      pop.querySelector(".cancel").addEventListener("click", closePopover);
+      pop.querySelector(".save").addEventListener("click", async () => {
+        const prompt = ta ? ta.value.trim() : "";
+        if (!prompt) return;
+        const saveBtn = pop.querySelector(".save");
+        saveBtn.disabled = true; saveBtn.textContent = "sending…";
+        await fetch("/api/card-generate-block", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ project: CARD.project, boardId: CARD.boardId, cardId: CARD.id, prompt }),
+        });
+        closePopover();
+      });
+      setTimeout(() => document.addEventListener("click", outsideClick, true), 0);
+    });
+    document.body.appendChild(btn);
+  }
+
+  function mountCardDeleteButton() {
+    const header = document.querySelector(".card-page-header .plan-meta");
+    if (!header) return;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "plan-delete-btn";
+    btn.textContent = "Delete card";
+    btn.addEventListener("click", async () => {
+      if (!confirm("Delete this card? This is permanent.")) return;
+      btn.disabled = true;
+      const r = await fetch("/api/card-delete", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ project: CARD.project, boardId: CARD.boardId, cardId: CARD.id }),
+      });
+      if (r.ok) location.href = "/projects/" + encodeURIComponent(CARD.project) + "?tab=" + encodeURIComponent(CARD.boardId);
+      else { const e = await r.json().catch(() => ({})); alert("delete failed: " + (e.error || r.status)); btn.disabled = false; }
+    });
+    header.appendChild(btn);
+  }
+
+  function mountCardInlineTitleEdit() {
+    const h1 = document.querySelector(".card-page-title");
+    if (!h1) return;
+    let lastTitle = h1.getAttribute("data-card-title") || h1.textContent || "";
+    const save = async () => {
+      const newTitle = (h1.textContent || "").trim();
+      if (!newTitle || newTitle === lastTitle) { h1.textContent = lastTitle; return; }
+      const r = await fetch("/api/board/update-card", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ project: CARD.project, boardId: CARD.boardId, cardId: CARD.id, title: newTitle }),
+      });
+      if (r.ok) { lastTitle = newTitle; CARD.title = newTitle; document.title = newTitle + " — " + document.title.split(" — ").slice(1).join(" — "); }
+      else { h1.textContent = lastTitle; const e = await r.json().catch(() => ({})); alert("rename failed: " + (e.error || r.status)); }
+    };
+    h1.addEventListener("blur", save);
+    h1.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); h1.blur(); } if (ev.key === "Escape") { h1.textContent = lastTitle; h1.blur(); } });
+  }
+
+  function mountCardStatusPill() {
+    const pill = document.querySelector(".card-status-pill");
+    if (!pill) return;
+    pill.style.cursor = "pointer";
+    pill.title = "Click to move to another column";
+    pill.addEventListener("click", () => {
+      closePopover();
+      const otherStatuses = (CARD.statuses || []).filter((s) => s !== CARD.status);
+      if (otherStatuses.length === 0) return;
+      const pop = document.createElement("div");
+      pop.className = "popover";
+      const rect = pill.getBoundingClientRect();
+      pop.style.cssText = `position:absolute;top:${rect.bottom + window.scrollY + 6}px;left:${rect.left + window.scrollX}px;min-width:160px;`;
+      pop.innerHTML = `<h6>Move to</h6>` + otherStatuses.map((s) =>
+        `<button type="button" class="status-move-btn" data-status="${escapeHtml(s)}" style="display:block;width:100%;text-align:left;margin-bottom:4px;">${escapeHtml(s)}</button>`
+      ).join("");
+      document.body.appendChild(pop);
+      pop.querySelectorAll(".status-move-btn").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const newStatus = btn.getAttribute("data-status");
+          closePopover();
+          const r = await fetch("/api/board/update-card", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ project: CARD.project, boardId: CARD.boardId, cardId: CARD.id, status: newStatus }),
+          });
+          if (r.ok) { pill.textContent = newStatus; CARD.status = newStatus; }
+          else { const e = await r.json().catch(() => ({})); alert("move failed: " + (e.error || r.status)); }
+        });
+      });
+      setTimeout(() => document.addEventListener("click", outsideClick, true), 0);
+    });
+  }
 
   // ---------- Help button ----------
   function mountHelpBtn() {

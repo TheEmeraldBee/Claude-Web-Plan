@@ -104,7 +104,8 @@ const SetStatusSchema = z.object({
 });
 
 const SetStateSchema = z.object({
-  state: z.enum(["idle", "thinking", "asking", "waiting", "implementing", "errored"]),
+  state: z.string().min(1),
+  color: z.string().optional(),
 });
 
 const AskUserSchema = z.object({
@@ -121,6 +122,13 @@ const RegisterComponentSchema = z.object({
 const GetPlanSchema = z.object({
   project: z.string().optional(),
   plan_id: z.string(),
+});
+
+const UpdateCardSourceSchema = z.object({
+  project: z.string().optional(),
+  board_id: z.string(),
+  card_id: z.string(),
+  source: z.string().min(1),
 });
 
 const ListPlansSchema = z.object({
@@ -240,14 +248,12 @@ async function callToolImpl(name: string, args: unknown): Promise<{ content: { t
     case "wait_for_message": {
       const queued = state.shiftBacklog();
       if (queued) {
-        state.setActivity({ kind: "thinking" });
         return ok(queued.text);
       }
       state.setActivity({ kind: "waiting" });
       const text = await new Promise<string>((resolve) => {
         state.registerPending({ kind: "message", resolve });
       });
-      state.setActivity({ kind: "thinking" });
       return ok(text);
     }
 
@@ -364,6 +370,20 @@ async function callToolImpl(name: string, args: unknown): Promise<{ content: { t
       return ok({ name: a.name, hint: "import this component in your plan/tab source. Run `check` to confirm everything still compiles." });
     }
 
+    case "update_card_source": {
+      const a = UpdateCardSourceSchema.parse(args);
+      const project = defaultProject(a.project);
+      const board = storage.readCardBoard(project, a.board_id);
+      if (!board) return err(`board_not_found: ${a.board_id}`);
+      const card = board.cards.find((c) => c.id === a.card_id);
+      if (!card) return err(`card_not_found: ${a.card_id}`);
+      try { await compileSourceForValidation(a.source, `card-${a.card_id}`); }
+      catch (e) { return err(`compile_failed: ${formatCompileError(e)}`); }
+      storage.writeCardSource(project, a.board_id, a.card_id, a.source);
+      state.broadcast({ type: "card:updated", project, boardId: a.board_id, cardId: a.card_id });
+      return ok({ card_id: a.card_id, board_id: a.board_id });
+    }
+
     case "set_plan_status": {
       const a = SetStatusSchema.parse(args);
       const project = defaultProject(a.project);
@@ -376,8 +396,8 @@ async function callToolImpl(name: string, args: unknown): Promise<{ content: { t
 
     case "set_state": {
       const a = SetStateSchema.parse(args);
-      state.setActivity({ kind: a.state });
-      return ok({ state: a.state });
+      state.setActivity({ kind: a.state, ...(a.color ? { color: a.color } : {}) });
+      return ok({ state: a.state, ...(a.color ? { color: a.color } : {}) });
     }
 
     case "list_plans": {
@@ -693,6 +713,7 @@ const TOOLS = [
   { name: "update_card", description: "Update a card's title, body, or status.", inputSchema: { type: "object", properties: { project: { type: "string" }, board_id: { type: "string" }, card_id: { type: "string" }, title: { type: "string" }, body: { type: "string" }, status: { type: "string" } }, required: ["board_id","card_id"] } },
   { name: "delete_card", description: "Permanently delete a card from a board.", inputSchema: { type: "object", properties: { project: { type: "string" }, board_id: { type: "string" }, card_id: { type: "string" } }, required: ["board_id","card_id"] } },
   { name: "list_cards", description: "List all cards on a board, optionally filtered by status.", inputSchema: { type: "object", properties: { project: { type: "string" }, board_id: { type: "string" }, status: { type: "string" } }, required: ["board_id"] } },
+  { name: "update_card_source", description: "Author or revise the Preact TSX source for a card page. Dry-compiled before persisting. Call this when handling [expand-card cardId=…] messages to flesh out the card's block content.", inputSchema: { type: "object", properties: { project: { type: "string" }, board_id: { type: "string" }, card_id: { type: "string" }, source: { type: "string" } }, required: ["board_id","card_id","source"] } },
 ];
 
 function spawnExistingWatchers() {

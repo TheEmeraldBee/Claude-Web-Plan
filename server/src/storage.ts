@@ -193,6 +193,50 @@ export class Storage {
   boardPath(project: string, boardId: string): string {
     return join(this.boardsDir(project), boardId + ".json");
   }
+  cardSourceDir(project: string, boardId: string): string {
+    return join(this.boardsDir(project), boardId + "-cards");
+  }
+  cardSourcePath(project: string, boardId: string, cardId: string): string {
+    return join(this.cardSourceDir(project, boardId), cardId + ".card.tsx");
+  }
+  cardNotesPath(project: string, boardId: string, cardId: string): string {
+    return join(this.cardSourceDir(project, boardId), cardId + ".card.notes.json");
+  }
+  readCardSource(project: string, boardId: string, cardId: string): string | null {
+    const p = this.cardSourcePath(project, boardId, cardId);
+    if (!existsSync(p)) return null;
+    return readFileSync(p, "utf8");
+  }
+  writeCardSource(project: string, boardId: string, cardId: string, source: string): void {
+    ensureDir(this.cardSourceDir(project, boardId));
+    atomicWrite(this.cardSourcePath(project, boardId, cardId), source);
+  }
+  readCardNotes(project: string, boardId: string, cardId: string): Record<string, string> {
+    const p = this.cardNotesPath(project, boardId, cardId);
+    if (!existsSync(p)) return {};
+    try { return JSON.parse(readFileSync(p, "utf8")) as Record<string, string>; }
+    catch { return {}; }
+  }
+  setCardComment(project: string, boardId: string, cardId: string, blockId: string, text: string): void {
+    ensureDir(this.cardSourceDir(project, boardId));
+    const notes = this.readCardNotes(project, boardId, cardId);
+    if (text === "") delete notes[blockId];
+    else notes[blockId] = text;
+    atomicWrite(this.cardNotesPath(project, boardId, cardId), JSON.stringify(notes, null, 2));
+  }
+  clearCardComment(project: string, boardId: string, cardId: string, blockId: string): boolean {
+    const notes = this.readCardNotes(project, boardId, cardId);
+    if (!(blockId in notes)) return false;
+    delete notes[blockId];
+    atomicWrite(this.cardNotesPath(project, boardId, cardId), JSON.stringify(notes, null, 2));
+    return true;
+  }
+  deleteCardFiles(project: string, boardId: string, cardId: string): void {
+    const src = this.cardSourcePath(project, boardId, cardId);
+    const notes = this.cardNotesPath(project, boardId, cardId);
+    if (existsSync(src)) rmSync(src);
+    if (existsSync(notes)) rmSync(notes);
+  }
 
   writeCardBoard(project: string, board: CardBoard): void {
     this.ensureProject(project);
