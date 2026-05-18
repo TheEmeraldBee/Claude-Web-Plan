@@ -535,6 +535,8 @@ pre.mermaid svg { max-width: 100%; height: auto; }
   position: absolute;
   z-index: 50;
   width: 280px;
+  max-width: calc(100vw - 32px);
+  box-sizing: border-box;
   background: var(--crust);
   border: 1px solid var(--surface1);
   border-radius: 10px;
@@ -799,7 +801,7 @@ pre.mermaid svg { max-width: 100%; height: auto; }
   font-weight: 600;
 }
 
-.tab-panel { min-height: 200px; }
+.tab-panel { min-height: 200px; padding-top: 20px; }
 
 /* Plans tab */
 .plan-section { margin-bottom: 28px; }
@@ -1117,7 +1119,7 @@ a.plan-row .when { color: var(--subtext0); font-size: 0.84rem; font-family: ui-m
   gap: 16px;
   overflow-x: auto;
   padding-bottom: 8px;
-  align-items: flex-start;
+  align-items: stretch;
 }
 .card-col {
   flex: 0 0 260px;
@@ -1147,8 +1149,7 @@ a.plan-row .when { color: var(--subtext0); font-size: 0.84rem; font-family: ui-m
   background: var(--base);
   border: 1px solid var(--surface0);
   border-radius: 8px;
-  padding: 10px 12px;
-  cursor: pointer;
+  padding: 0;
   transition: border-color 0.15s;
 }
 .card-item:hover { border-color: var(--mauve); }
@@ -1389,13 +1390,16 @@ a.plan-row .when { color: var(--subtext0); font-size: 0.84rem; font-family: ui-m
 }
 .status-move-btn:hover { background: var(--surface1); border-color: var(--mauve); }
 
+/* Suppress inner Plan component header on card pages — card shell provides its own */
+.card-page > .plan > .plan-header { display: none; }
+.card-page > .plan { padding-top: 0; }
+
 /* ---- Card board: card links and quick-move ---- */
 .card-item-link {
   display: block; text-decoration: none; color: inherit;
-  padding: 10px 12px;
+  padding: 10px 12px; cursor: pointer;
 }
 .card-item-link:hover .card-item-title { color: var(--mauve); }
-.card-item { padding: 0; }
 .card-item-footer {
   display: flex; align-items: center; justify-content: space-between;
   padding: 4px 12px 8px; gap: 6px;

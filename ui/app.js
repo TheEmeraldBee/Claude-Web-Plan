@@ -416,6 +416,7 @@
     mountCardDeleteButton();
     mountCardInlineTitleEdit();
     mountCardStatusPill();
+    mountCardFeedbackBar();
 
     window.addEventListener("wp:sse", (ev) => {
       const msg = ev.detail;
@@ -573,9 +574,10 @@
     `;
     document.body.appendChild(pop);
     const rect = block.getBoundingClientRect();
-    pop.style.position = "absolute";
-    pop.style.top = (rect.top + window.scrollY + 24) + "px";
-    pop.style.left = (Math.min(rect.right + window.scrollX + 16, window.innerWidth - 300)) + "px";
+    pop.style.position = "fixed";
+    pop.style.maxWidth = "calc(100vw - 32px)";
+    pop.style.top = Math.min(rect.top + 24, window.innerHeight - 200) + "px";
+    pop.style.left = Math.min(rect.right + 16, window.innerWidth - 296) + "px";
     const ta = pop.querySelector("textarea");
     ta && ta.focus();
     pop.querySelector(".cancel").addEventListener("click", closePopover);
@@ -627,6 +629,7 @@
   }
   function closePopover() {
     document.removeEventListener("click", outsideClick, true);
+    document.querySelectorAll(".modal-overlay").forEach((o) => o.remove());
     document.querySelectorAll(".popover").forEach((p) => p.remove());
   }
   function escapeHtml(s) {
@@ -698,19 +701,17 @@
   // ---------- Ask modal ----------
   function openAskModal(id, payload) {
     closePopover();
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.style.cssText = "position:fixed;inset:0;display:flex;align-items:center;justify-content:center;z-index:59;";
     const wrap = document.createElement("div");
     wrap.className = "popover";
-    wrap.style.position = "fixed";
-    wrap.style.top = "20%";
-    wrap.style.left = "50%";
-    wrap.style.transform = "translateX(-50%)";
-    wrap.style.width = "520px";
-    wrap.style.maxHeight = "70vh";
-    wrap.style.overflow = "auto";
+    wrap.style.cssText = "width:520px;max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);overflow-y:auto;";
     wrap.innerHTML = `<h6>planner is asking</h6>` + renderQuestions(payload.questions) +
       `<div class="row"><button type="button" class="cancel">later</button><button type="button" class="save">submit</button></div>`;
-    document.body.appendChild(wrap);
-    wrap.querySelector(".cancel").addEventListener("click", () => wrap.remove());
+    overlay.appendChild(wrap);
+    document.body.appendChild(overlay);
+    wrap.querySelector(".cancel").addEventListener("click", () => overlay.remove());
     wrap.querySelector(".save").addEventListener("click", async () => {
       const answers = collectAnswers(wrap, payload.questions);
       await fetch("/api/answer/" + encodeURIComponent(id), {
@@ -718,7 +719,7 @@
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ answers }),
       });
-      wrap.remove();
+      overlay.remove();
     });
   }
   function renderQuestions(qs) {
@@ -872,7 +873,7 @@
       </div>`;
     document.body.appendChild(pop);
     const rect = block.getBoundingClientRect();
-    pop.style.cssText = `position:absolute;top:${rect.bottom + window.scrollY + 8}px;left:${Math.min(rect.left + window.scrollX, window.innerWidth - 300)}px;`;
+    pop.style.cssText = `position:fixed;top:${Math.min(rect.bottom + 8, window.innerHeight - 200)}px;left:${Math.min(rect.left, window.innerWidth - 296)}px;max-width:calc(100vw - 32px);`;
     const ta = pop.querySelector("textarea");
     ta && ta.focus();
     pop.querySelector(".cancel").addEventListener("click", closePopover);
@@ -913,7 +914,7 @@
       closePopover();
       const pop = document.createElement("div");
       pop.className = "popover";
-      pop.style.cssText = "position:fixed;bottom:130px;right:16px;width:360px;";
+      pop.style.cssText = "position:fixed;bottom:130px;right:16px;width:360px;max-width:calc(100vw - 32px);";
       pop.innerHTML = `<h6>Add AI-generated block</h6>
         <textarea rows="3" placeholder="Describe what you want…"></textarea>
         <div class="row"><button type="button" class="cancel">Cancel</button><button type="button" class="save">Generate</button></div>`;
@@ -987,7 +988,7 @@
       const pop = document.createElement("div");
       pop.className = "popover";
       const rect = pill.getBoundingClientRect();
-      pop.style.cssText = `position:absolute;top:${rect.bottom + window.scrollY + 6}px;left:${rect.left + window.scrollX}px;min-width:160px;`;
+      pop.style.cssText = `position:fixed;top:${Math.min(rect.bottom + 6, window.innerHeight - 150)}px;left:${Math.min(rect.left, window.innerWidth - 176)}px;min-width:160px;max-width:calc(100vw - 32px);`;
       pop.innerHTML = `<h6>Move to</h6>` + otherStatuses.map((s) =>
         `<button type="button" class="status-move-btn" data-status="${escapeHtml(s)}" style="display:block;width:100%;text-align:left;margin-bottom:4px;">${escapeHtml(s)}</button>`
       ).join("");
@@ -1005,6 +1006,36 @@
         });
       });
       setTimeout(() => document.addEventListener("click", outsideClick, true), 0);
+    });
+  }
+
+  function mountCardFeedbackBar() {
+    const bar = document.createElement("div");
+    bar.className = "send-feedback-bar";
+    bar.innerHTML = `<button type="button" class="send-feedback">Send feedback to planner</button><span class="bar-hint" hidden></span>`;
+    const target = document.querySelector(".plan-blocks") || document.querySelector(".plan");
+    if (target) target.appendChild(bar);
+    const fbBtn = bar.querySelector(".send-feedback");
+    const hint = bar.querySelector(".bar-hint");
+    function showHint(text) { hint.textContent = text; hint.hidden = false; setTimeout(() => { hint.hidden = true; }, 4000); }
+    fbBtn.addEventListener("click", async () => {
+      fbBtn.disabled = true;
+      try {
+        const r = await fetch("/api/card-feedback", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ project: CARD.project, boardId: CARD.boardId, cardId: CARD.id }),
+        });
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          alert(body.error === "no_comments" ? "add a comment first" : "send failed: " + (body.error || r.status));
+        } else if (body.queued) {
+          showHint("queued — planner is busy; will deliver next");
+        } else {
+          showHint("sent");
+        }
+      } finally {
+        fbBtn.disabled = false;
+      }
     });
   }
 

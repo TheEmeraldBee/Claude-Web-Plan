@@ -243,7 +243,7 @@ function defaultProject(arg?: string): string {
 
 // ---------- tool handlers ----------
 
-async function callToolImpl(name: string, args: unknown): Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }> {
+async function callToolImpl(name: string, args: unknown, signal?: AbortSignal): Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }> {
   switch (name) {
     case "wait_for_message": {
       const queued = state.shiftBacklog();
@@ -251,8 +251,12 @@ async function callToolImpl(name: string, args: unknown): Promise<{ content: { t
         return ok(queued.text);
       }
       state.setActivity({ kind: "waiting" });
-      const text = await new Promise<string>((resolve) => {
-        state.registerPending({ kind: "message", resolve });
+      const text = await new Promise<string>((resolve, reject) => {
+        const id = state.registerPending({ kind: "message", resolve });
+        signal?.addEventListener("abort", () => {
+          state.takePending(id);
+          reject(new Error("wait_for_message cancelled"));
+        }, { once: true });
       });
       return ok(text);
     }
@@ -731,8 +735,8 @@ async function main() {
   const server = new Server({ name: "web-planner", version: "0.1.0" }, { capabilities: { tools: {} } });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
-    return callToolImpl(req.params.name, req.params.arguments ?? {});
+  server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
+    return callToolImpl(req.params.name, req.params.arguments ?? {}, extra?.signal);
   });
 
   const transport = new StdioServerTransport();

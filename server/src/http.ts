@@ -424,10 +424,7 @@ function renderBoardTab(project: string, boardId: string): string {
           <div class="card-item-title">${escapeHtml(c.title)}</div>
           ${c.body ? `<div class="card-item-body">${escapeHtml(c.body)}</div>` : ""}
         </a>
-        <div class="card-item-footer">
-          <span class="card-item-status">${escapeHtml(status)}</span>
-          ${otherStatuses.length > 0 ? `<div class="card-quick-move-wrap">${quickMoveOpts}</div>` : ""}
-        </div>
+        ${otherStatuses.length > 0 ? `<div class="card-item-footer"><div class="card-quick-move-wrap">${quickMoveOpts}</div></div>` : ""}
       </div>`;
     }).join("");
     return `<div class="card-col" data-status="${escapeHtml(status)}">
@@ -601,8 +598,8 @@ async function handleBoardUpdateStatuses(req: IncomingMessage, res: ServerRespon
   }
 }
 
-const CARD_STUB_SOURCE = (title: string, body: string) =>
-  `import { Plan, Block, Callout } from "@web-planner/kit";\n\nexport default () => (\n  <Plan title="${title.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}" status="proposed">\n    <Block id="b-brief" kind="summary">\n      <Callout>${body.replace(/[<>&]/g, (c: string) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]!))}</Callout>\n    </Block>\n  </Plan>\n);\n`;
+const CARD_STUB_SOURCE = (_title: string, body: string) =>
+  `import { Block, Callout } from "@web-planner/kit";\n\nexport default () => (\n  <div class="plan-blocks">\n    <Block id="b-brief" kind="summary">\n      <Callout>${body.replace(/[<>&]/g, (c: string) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]!))}</Callout>\n    </Block>\n  </div>\n);\n`;
 
 async function handleCardPage(_req: IncomingMessage, res: ServerResponse, project: string, boardId: string, cardId: string) {
   const board = storage.readCardBoard(project, boardId);
@@ -657,6 +654,27 @@ async function handleCardComment(req: IncomingMessage, res: ServerResponse) {
   } catch (e) {
     sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) });
   }
+}
+
+async function handleCardFeedback(req: IncomingMessage, res: ServerResponse) {
+  const body = await readBody(req);
+  let parsed: { project?: string; boardId?: string; cardId?: string };
+  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
+  const { project, boardId, cardId } = parsed;
+  if (!project || !boardId || !cardId) return sendJson(res, 400, { error: "missing_fields" });
+  const board = storage.readCardBoard(project, boardId);
+  if (!board) return sendJson(res, 404, { error: "board_not_found" });
+  const card = board.cards.find((c) => c.id === cardId);
+  if (!card) return sendJson(res, 404, { error: "card_not_found" });
+  const notes = storage.readCardNotes(project, boardId, cardId);
+  const entries = Object.entries(notes);
+  if (entries.length === 0) return sendJson(res, 400, { error: "no_comments" });
+  const lines: string[] = [`Feedback on card "${card.title}" (cardId=${cardId} boardId=${boardId}):`, ""];
+  for (const [blockId, comment] of entries) lines.push(`[${blockId}] ${comment}`);
+  lines.push("", "Please revise.");
+  const text = lines.join("\n");
+  const r = state.enqueueOrDeliver({ text, kind: "chat", meta: { cardId, boardId, project } });
+  sendJson(res, 200, { ok: true, queued: r.queued, position: r.position });
 }
 
 async function handleCreateCardStub(req: IncomingMessage, res: ServerResponse) {
@@ -759,6 +777,7 @@ async function router(req: IncomingMessage, res: ServerResponse) {
     if (m === "POST" && url.pathname === "/api/tab-comment") return handleTabComment(req, res);
     if (m === "POST" && url.pathname === "/api/create-tab") return handleCreateTab(req, res);
     if (m === "POST" && url.pathname === "/api/card-comment") return handleCardComment(req, res);
+    if (m === "POST" && url.pathname === "/api/card-feedback") return handleCardFeedback(req, res);
     if (m === "POST" && url.pathname === "/api/create-card-stub") return handleCreateCardStub(req, res);
     if (m === "POST" && url.pathname === "/api/card-generate-block") return handleCardGenerateBlock(req, res);
     if (m === "POST" && url.pathname === "/api/card-delete") return handleCardDelete(req, res);

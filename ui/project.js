@@ -235,9 +235,12 @@
   }
 
   function openNewPlanModal() {
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.style.cssText = "position:fixed;inset:0;display:flex;align-items:center;justify-content:center;z-index:59;";
     const modal = document.createElement("div");
     modal.className = "popover";
-    modal.style.cssText = "position:fixed;top:30%;left:50%;transform:translateX(-50%);width:480px;z-index:60;";
+    modal.style.cssText = "width:480px;max-width:calc(100vw - 32px);max-height:calc(100vh - 64px);overflow-y:auto;";
     modal.innerHTML = `
       <h6>New plan</h6>
       <input type="text" class="new-plan-title" placeholder="Plan title…"
@@ -248,14 +251,12 @@
         <button type="button" class="cancel">Cancel</button>
         <button type="button" class="save">Create</button>
       </div>`;
-    document.body.appendChild(modal);
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
     const titleInput = modal.querySelector(".new-plan-title");
     titleInput && titleInput.focus();
-    modal.querySelector(".cancel").addEventListener("click", () => modal.remove());
-    function _outerClickNewPlan(ev) {
-      if (!modal.contains(ev.target)) { modal.remove(); document.removeEventListener("click", _outerClickNewPlan, true); }
-    }
-    setTimeout(() => document.addEventListener("click", _outerClickNewPlan, true), 0);
+    modal.querySelector(".cancel").addEventListener("click", () => overlay.remove());
+    overlay.addEventListener("click", (ev) => { if (!modal.contains(ev.target)) overlay.remove(); });
     modal.querySelector(".save").addEventListener("click", async () => {
       const title = titleInput ? titleInput.value.trim() : "";
       const brief = modal.querySelector(".new-plan-brief")?.value.trim() || "";
@@ -268,7 +269,7 @@
           body: JSON.stringify({ title, brief, project }),
         });
         const data = await r.json().catch(() => ({}));
-        if (r.ok) { modal.remove(); if (data.url) location.href = data.url; }
+        if (r.ok) { overlay.remove(); if (data.url) location.href = data.url; }
         else { alert("create failed: " + (data.error || r.status)); saveBtn.disabled = false; saveBtn.textContent = "Create"; }
       } catch (e) { alert("create failed: " + e); saveBtn.disabled = false; saveBtn.textContent = "Create"; }
     });
@@ -276,11 +277,15 @@
 
   // ---------- Card modal (replaces prompt() for add/edit) ----------
   function openCardModal({ project: proj, boardId, status, cardId, curStatus, statuses }) {
+    document.querySelectorAll(".modal-overlay").forEach((o) => o.remove());
     document.querySelectorAll(".popover").forEach((p) => p.remove());
     const isEdit = !!cardId;
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.style.cssText = "position:fixed;inset:0;display:flex;align-items:center;justify-content:center;z-index:59;";
     const modal = document.createElement("div");
     modal.className = "popover";
-    modal.style.cssText = "position:fixed;top:30%;left:50%;transform:translateX(-50%);width:400px;z-index:60;";
+    modal.style.cssText = "width:400px;max-width:calc(100vw - 32px);max-height:calc(100vh - 64px);overflow-y:auto;";
     const INPUT_S = "width:100%;padding:7px 10px;background:var(--mantle);border:1px solid var(--surface0);border-radius:6px;color:var(--text);font-size:0.9rem;font-family:inherit;box-sizing:border-box;";
     const statusOpts = (statuses || [status]).map((s) =>
       `<option value="${escapeHtml(s)}"${s === (curStatus || status) ? " selected" : ""}>${escapeHtml(s)}</option>`
@@ -297,14 +302,12 @@
         ${!isEdit ? `<button type="button" class="save-plain">Add card</button>` : ""}
         <button type="button" class="save">${isEdit ? "Update" : "Add with AI ✦"}</button>
       </div>`;
-    document.body.appendChild(modal);
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
     const errEl = modal.querySelector(".modal-error");
     if (!isEdit) modal.querySelector(".card-title-input").focus();
-    modal.querySelector(".cancel").addEventListener("click", () => modal.remove());
-    function _outerClickCardModal(ev) {
-      if (!modal.contains(ev.target)) { modal.remove(); document.removeEventListener("click", _outerClickCardModal, true); }
-    }
-    setTimeout(() => document.addEventListener("click", _outerClickCardModal, true), 0);
+    modal.querySelector(".cancel").addEventListener("click", () => overlay.remove());
+    overlay.addEventListener("click", (ev) => { if (!modal.contains(ev.target)) overlay.remove(); });
 
     const plainBtn = modal.querySelector(".save-plain");
     if (plainBtn) {
@@ -319,7 +322,7 @@
             method: "POST", headers: { "content-type": "application/json" },
             body: JSON.stringify({ project: proj, boardId, title, body: brief, status: newStatus }),
           });
-          if (r.ok) modal.remove();
+          if (r.ok) overlay.remove();
           else { const e = await r.json().catch(() => ({})); errEl.style.display = ""; errEl.textContent = "Create failed: " + (e.error || r.status); plainBtn.disabled = false; }
         } catch (e) { errEl.style.display = ""; errEl.textContent = "Create failed: " + e; plainBtn.disabled = false; }
       });
@@ -339,18 +342,18 @@
             body: JSON.stringify({ project: proj, boardId, title, brief, status: newStatus }),
           });
           const data = await r.json().catch(() => ({}));
-          if (r.ok && data.url) { modal.remove(); location.href = data.url; }
+          if (r.ok && data.url) { overlay.remove(); location.href = data.url; }
           else { errEl.style.display = ""; errEl.textContent = "Create failed: " + (data.error || r.status); saveBtn.disabled = false; saveBtn.textContent = "Add with AI ✦"; }
         } catch (e) { errEl.style.display = ""; errEl.textContent = "Create failed: " + e; saveBtn.disabled = false; saveBtn.textContent = "Add with AI ✦"; }
       } else {
-        if (newStatus === curStatus) { modal.remove(); return; }
+        if (newStatus === curStatus) { overlay.remove(); return; }
         saveBtn.disabled = true;
         try {
           const r = await fetch("/api/board/update-card", {
             method: "POST", headers: { "content-type": "application/json" },
             body: JSON.stringify({ project: proj, boardId, cardId, status: newStatus }),
           });
-          if (r.ok) modal.remove();
+          if (r.ok) overlay.remove();
           else { const e = await r.json().catch(() => ({})); errEl.style.display = ""; errEl.textContent = "Update failed: " + (e.error || r.status); saveBtn.disabled = false; }
         } catch (e) { errEl.style.display = ""; errEl.textContent = "Update failed: " + e; saveBtn.disabled = false; }
       }
@@ -401,13 +404,17 @@
   }
 
   function openEditColumnsPopover(boardId, proj) {
+    document.querySelectorAll(".modal-overlay").forEach((o) => o.remove());
     document.querySelectorAll(".popover").forEach((p) => p.remove());
     const boardEl = document.querySelector(`[data-board-id="${CSS.escape(boardId)}"]`);
     const currentStatuses = [...(boardEl?.querySelectorAll(".card-col") || [])].map((c) => c.getAttribute("data-status")).filter(Boolean);
 
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.style.cssText = "position:fixed;inset:0;display:flex;align-items:center;justify-content:center;z-index:59;";
     const pop = document.createElement("div");
     pop.className = "popover";
-    pop.style.cssText = "position:fixed;top:20%;left:50%;transform:translateX(-50%);width:380px;z-index:60;";
+    pop.style.cssText = "width:380px;max-width:calc(100vw - 32px);max-height:calc(100vh - 64px);overflow-y:auto;";
 
     const colRowStyle = "display:flex;gap:6px;align-items:center;";
     const colBtnStyle = "background:var(--surface0);border:1px solid var(--surface1);color:var(--subtext0);border-radius:4px;padding:2px 7px;cursor:pointer;font-family:inherit;font-size:0.82rem;";
@@ -432,7 +439,8 @@
         <button type="button" class="cancel">Cancel</button>
         <button type="button" class="save">Save</button>
       </div>`;
-    document.body.appendChild(pop);
+    overlay.appendChild(pop);
+    document.body.appendChild(overlay);
 
     function getStatuses() {
       return [...pop.querySelectorAll(".col-name")].map((i) => i.value.trim()).filter(Boolean);
@@ -465,7 +473,8 @@
         const s = getStatuses(); s.splice(i, 1); rebuildRows(s);
       }
     });
-    pop.querySelector(".cancel").addEventListener("click", () => pop.remove());
+    pop.querySelector(".cancel").addEventListener("click", () => overlay.remove());
+    overlay.addEventListener("click", (ev) => { if (!pop.contains(ev.target)) overlay.remove(); });
     pop.querySelector(".save").addEventListener("click", async () => {
       const statuses = getStatuses();
       const errEl = pop.querySelector(".col-error");
@@ -477,17 +486,10 @@
           method: "POST", headers: { "content-type": "application/json" },
           body: JSON.stringify({ project: proj, boardId, statuses }),
         });
-        if (r.ok) { pop.remove(); refetchActiveTab(); }
+        if (r.ok) { overlay.remove(); refetchActiveTab(); }
         else { const e = await r.json().catch(() => ({})); errEl.style.display = ""; errEl.textContent = "Save failed: " + (e.error || r.status); saveBtn.disabled = false; }
       } catch (e) { errEl.style.display = ""; errEl.textContent = "Save failed: " + e; saveBtn.disabled = false; }
     });
-    function _outerClickColPop(ev) {
-      if (!pop.contains(ev.target)) {
-        pop.remove();
-        document.removeEventListener("click", _outerClickColPop, true);
-      }
-    }
-    setTimeout(() => document.addEventListener("click", _outerClickColPop, true), 0);
   }
 
   // ---------- Plan search ----------
@@ -549,6 +551,7 @@
   }
 
   function openTabCommentPopover(tabId, blockId, triggerBtn) {
+    document.querySelectorAll(".modal-overlay").forEach((o) => o.remove());
     document.querySelectorAll(".popover").forEach((p) => p.remove());
     const block = document.querySelector(`[data-block-id="${blockId}"]`);
     if (!block) return;
@@ -567,7 +570,7 @@
       </div>`;
     document.body.appendChild(pop);
     const rect = block.getBoundingClientRect();
-    pop.style.cssText = `position:absolute;top:${rect.bottom + window.scrollY + 8}px;left:${Math.min(rect.left + window.scrollX, window.innerWidth - 300)}px;`;
+    pop.style.cssText = `position:fixed;top:${Math.min(rect.bottom + 8, window.innerHeight - 200)}px;left:${Math.min(rect.left, window.innerWidth - 296)}px;max-width:calc(100vw - 32px);`;
     const ta = pop.querySelector("textarea");
     ta && ta.focus();
     pop.querySelector(".cancel").addEventListener("click", () => pop.remove());
@@ -632,9 +635,12 @@
   const INPUT_STYLE = "width:100%;padding:7px 10px;background:var(--mantle);border:1px solid var(--surface0);border-radius:6px;color:var(--text);font-size:0.9rem;font-family:inherit;box-sizing:border-box;";
 
   function openNewTabModal() {
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.style.cssText = "position:fixed;inset:0;display:flex;align-items:center;justify-content:center;z-index:59;";
     const modal = document.createElement("div");
     modal.className = "popover";
-    modal.style.cssText = "position:fixed;top:30%;left:50%;transform:translateX(-50%);width:480px;z-index:60;";
+    modal.style.cssText = "width:480px;max-width:calc(100vw - 32px);max-height:calc(100vh - 64px);overflow-y:auto;";
     modal.innerHTML = `
       <h6>New tab</h6>
       <div class="tab-type-toggle">
@@ -660,7 +666,8 @@
         <button type="button" class="save">Create with AI</button>
       </div>
       <div class="new-tab-status" hidden style="margin-top:8px;font-size:0.85rem;color:var(--subtext1);"></div>`;
-    document.body.appendChild(modal);
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
 
     const titleInput = modal.querySelector(".new-tab-title");
     const saveBtn = modal.querySelector(".save");
@@ -684,7 +691,8 @@
     });
 
     titleInput && titleInput.focus();
-    modal.querySelector(".cancel").addEventListener("click", () => modal.remove());
+    modal.querySelector(".cancel").addEventListener("click", () => overlay.remove());
+    overlay.addEventListener("click", (ev) => { if (!modal.contains(ev.target)) overlay.remove(); });
 
     saveBtn.addEventListener("click", async () => {
       clearError();
@@ -712,7 +720,7 @@
               body: JSON.stringify({ project, boardId: data.board_id, title: seed, status: statuses[0] }),
             });
           }
-          modal.remove();
+          overlay.remove();
           window.location.href = "?tab=" + encodeURIComponent(data.board_id);
         } catch (e) { showError("Create failed: " + e); saveBtn.disabled = false; saveBtn.textContent = "Create board"; }
         return;
@@ -732,7 +740,7 @@
         if (!r.ok) { showError("Create failed: " + (data.error || r.status)); saveBtn.disabled = false; saveBtn.textContent = "Create with AI"; statusEl.hidden = true; return; }
         statusEl.textContent = data.queued ? "Queued — planner is busy. Tab will appear when ready." : "Planner is working… (page will reload when done)";
         const _modalTid = setTimeout(() => {
-          modal.remove();
+          overlay.remove();
           (window.__showToast || alert)("The planner didn't respond in 60 s — check the chat panel.");
         }, 60000);
         modal.setAttribute("data-waiting", "1");
@@ -807,6 +815,6 @@
   });
 
   document.addEventListener("keydown", (ev) => {
-    if (ev.key === "Escape") document.querySelectorAll(".popover").forEach((p) => p.remove());
+    if (ev.key === "Escape") { document.querySelectorAll(".modal-overlay").forEach((o) => o.remove()); document.querySelectorAll(".popover").forEach((p) => p.remove()); }
   });
 })();
