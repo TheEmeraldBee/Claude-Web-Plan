@@ -1,6 +1,6 @@
 import type { PlanProps } from "./types.js";
 
-export function Plan({ title, status = "proposed", children }: PlanProps) {
+export function Plan({ title, status = "designing", children }: PlanProps) {
   return (
     <main class="plan" data-status={status}>
       <header class="plan-header">

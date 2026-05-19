@@ -11,7 +11,21 @@ import {
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
-export type PlanStatus = "proposed" | "approved" | "implemented" | "abandoned";
+export const STATUSES = ["designing", "ready", "implemented", "rejected"] as const;
+export type PlanStatus = typeof STATUSES[number];
+
+const STATUS_MIGRATION: Record<string, PlanStatus> = {
+  proposed: "designing",
+  approved: "ready",
+  designed: "designing",
+  implemented: "implemented",
+  abandoned: "rejected",
+};
+
+function migrateStatus(raw: string): PlanStatus {
+  if ((STATUSES as readonly string[]).includes(raw)) return raw as PlanStatus;
+  return STATUS_MIGRATION[raw] ?? "designing";
+}
 
 export interface PlanMeta {
   id: string;          // <ts>-<slug>
@@ -26,13 +40,12 @@ export interface PlanMeta {
 export interface PlanRecord {
   meta: PlanMeta;
   source: string;          // .plan.tsx source
-  notes: Record<string, string>; // blockId -> comment
 }
 
 export interface TabRef {
   id: string;
   title: string;
-  kind: "builtin" | "custom" | "board";
+  kind: "builtin" | "custom";
 }
 
 export interface ProjectMeta {
@@ -46,25 +59,21 @@ export interface ProjectMeta {
   modified: string;
 }
 
-export interface Card {
+export type CommentTargetKind = "plan" | "tab";
+export interface Comment {
   id: string;
-  title: string;
-  body: string;
-  status: string;
+  target_kind: CommentTargetKind;
+  target_id: string;
+  block_id: string;
+  text: string;
   created: string;
   modified: string;
 }
 
-export interface CardBoard {
-  id: string;
-  title: string;
-  statuses: string[];
-  cards: Card[];
-}
-
 const META_SUFFIX = ".meta.json";
 const SOURCE_SUFFIX = ".plan.tsx";
-const NOTES_SUFFIX = ".notes.json";
+const NOTES_SUFFIX = ".notes.json"; // legacy — migrated then deleted
+const COMMENTS_FILE = "comments.json";
 const PROJECT_META = "project.json";
 const TAB_SUFFIX = ".tab.tsx";
 const BUILTIN_TABS: TabRef[] = [
@@ -87,18 +96,19 @@ export class Storage {
   constructor(private readonly root: string) {
     ensureDir(root);
     ensureDir(join(root, "projects"));
+    this.migrateAll();
   }
 
-  projectDir(project: string): string {
-    return join(this.root, "projects", project);
-  }
-  plansDir(project: string): string {
-    return join(this.projectDir(project), "plans");
-  }
-  componentsPath(project: string): string {
-    return join(this.projectDir(project), "components.tsx");
-  }
+  // ---------- paths ----------
+  projectDir(project: string): string { return join(this.root, "projects", project); }
+  plansDir(project: string): string { return join(this.projectDir(project), "plans"); }
+  tabsDir(project: string): string { return join(this.projectDir(project), "tabs"); }
+  componentsPath(project: string): string { return join(this.projectDir(project), "components.tsx"); }
+  tabPath(project: string, tabId: string): string { return join(this.tabsDir(project), tabId + TAB_SUFFIX); }
+  commentsPath(project: string): string { return join(this.projectDir(project), COMMENTS_FILE); }
+  basePath(project: string, planId: string): string { return join(this.plansDir(project), planId); }
 
+  // ---------- project ----------
   ensureProject(project: string) {
     ensureDir(this.plansDir(project));
     ensureDir(this.tabsDir(project));
@@ -110,23 +120,11 @@ export class Storage {
     if (!existsSync(metaPath)) {
       const now = new Date().toISOString();
       const meta: ProjectMeta = {
-        slug: project,
-        name: project,
-        description: "",
-        watchPath: "",
-        tabs: BUILTIN_TABS.slice(),
-        created: now,
-        modified: now,
+        slug: project, name: project, description: "", watchPath: "",
+        tabs: BUILTIN_TABS.slice(), created: now, modified: now,
       };
       atomicWrite(metaPath, JSON.stringify(meta, null, 2));
     }
-  }
-
-  tabsDir(project: string): string {
-    return join(this.projectDir(project), "tabs");
-  }
-  tabPath(project: string, tabId: string): string {
-    return join(this.tabsDir(project), tabId + TAB_SUFFIX);
   }
 
   readProject(project: string): ProjectMeta | null {
@@ -153,6 +151,19 @@ export class Storage {
     return next;
   }
 
+  setTheme(project: string, theme: string | Record<string, string>): ProjectMeta {
+    this.ensureProject(project);
+    const existing = this.readProject(project)!;
+    const next: ProjectMeta = { ...existing, theme };
+    this.writeProject(next);
+    return next;
+  }
+
+  getTheme(project: string): string | Record<string, string> | undefined {
+    return this.readProject(project)?.theme;
+  }
+
+  // ---------- tabs ----------
   writeTab(project: string, id: string, title: string, source: string): ProjectMeta {
     this.ensureProject(project);
     if (!/^[a-z][a-z0-9-]*$/.test(id)) throw new Error(`invalid_tab_id: ${id} (must be lowercase kebab)`);
@@ -175,226 +186,36 @@ export class Storage {
     return meta;
   }
 
-  setTheme(project: string, theme: string | Record<string, string>): ProjectMeta {
-    this.ensureProject(project);
-    const existing = this.readProject(project)!;
-    const next: ProjectMeta = { ...existing, theme };
-    this.writeProject(next);
-    return next;
-  }
-
-  getTheme(project: string): string | Record<string, string> | undefined {
-    return this.readProject(project)?.theme;
-  }
-
-  boardsDir(project: string): string {
-    return join(this.projectDir(project), "boards");
-  }
-  boardPath(project: string, boardId: string): string {
-    return join(this.boardsDir(project), boardId + ".json");
-  }
-  cardSourceDir(project: string, boardId: string): string {
-    return join(this.boardsDir(project), boardId + "-cards");
-  }
-  cardSourcePath(project: string, boardId: string, cardId: string): string {
-    return join(this.cardSourceDir(project, boardId), cardId + ".card.tsx");
-  }
-  cardNotesPath(project: string, boardId: string, cardId: string): string {
-    return join(this.cardSourceDir(project, boardId), cardId + ".card.notes.json");
-  }
-  readCardSource(project: string, boardId: string, cardId: string): string | null {
-    const p = this.cardSourcePath(project, boardId, cardId);
-    if (!existsSync(p)) return null;
-    return readFileSync(p, "utf8");
-  }
-  writeCardSource(project: string, boardId: string, cardId: string, source: string): void {
-    ensureDir(this.cardSourceDir(project, boardId));
-    atomicWrite(this.cardSourcePath(project, boardId, cardId), source);
-  }
-  readCardNotes(project: string, boardId: string, cardId: string): Record<string, string> {
-    const p = this.cardNotesPath(project, boardId, cardId);
-    if (!existsSync(p)) return {};
-    try { return JSON.parse(readFileSync(p, "utf8")) as Record<string, string>; }
-    catch { return {}; }
-  }
-  setCardComment(project: string, boardId: string, cardId: string, blockId: string, text: string): void {
-    ensureDir(this.cardSourceDir(project, boardId));
-    const notes = this.readCardNotes(project, boardId, cardId);
-    if (text === "") delete notes[blockId];
-    else notes[blockId] = text;
-    atomicWrite(this.cardNotesPath(project, boardId, cardId), JSON.stringify(notes, null, 2));
-  }
-  clearCardComment(project: string, boardId: string, cardId: string, blockId: string): boolean {
-    const notes = this.readCardNotes(project, boardId, cardId);
-    if (!(blockId in notes)) return false;
-    delete notes[blockId];
-    atomicWrite(this.cardNotesPath(project, boardId, cardId), JSON.stringify(notes, null, 2));
-    return true;
-  }
-  deleteCardFiles(project: string, boardId: string, cardId: string): void {
-    const src = this.cardSourcePath(project, boardId, cardId);
-    const notes = this.cardNotesPath(project, boardId, cardId);
-    if (existsSync(src)) rmSync(src);
-    if (existsSync(notes)) rmSync(notes);
-  }
-
-  writeCardBoard(project: string, board: CardBoard): void {
-    this.ensureProject(project);
-    ensureDir(this.boardsDir(project));
-    atomicWrite(this.boardPath(project, board.id), JSON.stringify(board, null, 2));
-  }
-
-  readCardBoard(project: string, boardId: string): CardBoard | null {
-    const path = this.boardPath(project, boardId);
-    if (!existsSync(path)) return null;
-    try { return JSON.parse(readFileSync(path, "utf8")) as CardBoard; }
-    catch { return null; }
-  }
-
-  createCardBoard(project: string, id: string, title: string, statuses: string[]): CardBoard {
-    if (!/^[a-z][a-z0-9-]*$/.test(id)) throw new Error(`invalid_board_id: ${id}`);
-    const board: CardBoard = { id, title, statuses, cards: [] };
-    this.writeCardBoard(project, board);
-    const meta = this.readProject(project)!;
-    const i = meta.tabs.findIndex((t) => t.id === id);
-    const entry: TabRef = { id, title, kind: "board" };
-    if (i === -1) meta.tabs.push(entry);
-    else meta.tabs[i] = entry;
-    this.writeProject(meta);
-    return board;
-  }
-
-  updateBoardStatuses(project: string, boardId: string, statuses: string[]): CardBoard {
-    if (statuses.length === 0) throw new Error("statuses_empty");
-    const board = this.readCardBoard(project, boardId);
-    if (!board) throw new Error(`board_not_found: ${boardId}`);
-    const statusSet = new Set(statuses);
-    board.statuses = statuses;
-    board.cards = board.cards.map((c) => ({ ...c, status: statusSet.has(c.status) ? c.status : statuses[0]! }));
-    this.writeCardBoard(project, board);
-    return board;
-  }
-
-  addCard(project: string, boardId: string, title: string, body: string, status: string): Card {
-    const board = this.readCardBoard(project, boardId);
-    if (!board) throw new Error(`board_not_found: ${boardId}`);
-    if (!board.statuses.includes(status)) throw new Error(`invalid_status: ${status}. Valid: ${board.statuses.join(", ")}`);
-    const now = new Date().toISOString();
-    const card: Card = { id: randomUUID(), title, body, status, created: now, modified: now };
-    board.cards.push(card);
-    this.writeCardBoard(project, board);
-    return card;
-  }
-
-  updateCard(project: string, boardId: string, cardId: string, patch: Partial<Pick<Card, "title" | "body" | "status">>): Card {
-    const board = this.readCardBoard(project, boardId);
-    if (!board) throw new Error(`board_not_found: ${boardId}`);
-    const i = board.cards.findIndex((c) => c.id === cardId);
-    if (i === -1) throw new Error(`card_not_found: ${cardId}`);
-    if (patch.status && !board.statuses.includes(patch.status)) throw new Error(`invalid_status: ${patch.status}`);
-    board.cards[i] = { ...board.cards[i]!, ...patch, modified: new Date().toISOString() };
-    this.writeCardBoard(project, board);
-    return board.cards[i]!;
-  }
-
-  deleteCard(project: string, boardId: string, cardId: string): boolean {
-    const board = this.readCardBoard(project, boardId);
-    if (!board) throw new Error(`board_not_found: ${boardId}`);
-    const before = board.cards.length;
-    board.cards = board.cards.filter((c) => c.id !== cardId);
-    this.writeCardBoard(project, board);
-    return board.cards.length < before;
-  }
-
-  listCards(project: string, boardId: string, status?: string): Card[] {
-    const board = this.readCardBoard(project, boardId);
-    if (!board) throw new Error(`board_not_found: ${boardId}`);
-    return status ? board.cards.filter((c) => c.status === status) : board.cards;
-  }
-
-  tabNotesPath(project: string, tabId: string): string {
-    return join(this.tabsDir(project), tabId + ".tab.notes.json");
-  }
-
-  readTabNotes(project: string, tabId: string): Record<string, string> {
-    const p = this.tabNotesPath(project, tabId);
-    if (!existsSync(p)) return {};
-    try { return JSON.parse(readFileSync(p, "utf8")) as Record<string, string>; }
-    catch { return {}; }
-  }
-
-  setTabComment(project: string, tabId: string, blockId: string, text: string) {
-    this.ensureProject(project);
-    const notes = this.readTabNotes(project, tabId);
-    if (text === "") {
-      delete notes[blockId];
-    } else {
-      notes[blockId] = text;
-    }
-    atomicWrite(this.tabNotesPath(project, tabId), JSON.stringify(notes, null, 2));
-  }
-
   readTabSource(project: string, id: string): string | null {
     const path = this.tabPath(project, id);
     if (!existsSync(path)) return null;
     return readFileSync(path, "utf8");
   }
 
-  basePath(project: string, planId: string): string {
-    return join(this.plansDir(project), planId);
-  }
-
+  // ---------- plans ----------
   writePlan(rec: PlanRecord): void {
     this.ensureProject(rec.meta.project);
     const base = this.basePath(rec.meta.project, rec.meta.id);
     atomicWrite(base + SOURCE_SUFFIX, rec.source);
     atomicWrite(base + META_SUFFIX, JSON.stringify(rec.meta, null, 2));
-    atomicWrite(base + NOTES_SUFFIX, JSON.stringify(rec.notes, null, 2));
   }
 
   readPlan(project: string, planId: string): PlanRecord | null {
     const base = this.basePath(project, planId);
     if (!existsSync(base + SOURCE_SUFFIX) || !existsSync(base + META_SUFFIX)) return null;
-    const meta = JSON.parse(readFileSync(base + META_SUFFIX, "utf8")) as PlanMeta;
+    const raw = JSON.parse(readFileSync(base + META_SUFFIX, "utf8")) as PlanMeta;
+    raw.status = migrateStatus(raw.status as unknown as string);
     const source = readFileSync(base + SOURCE_SUFFIX, "utf8");
-    const notes = existsSync(base + NOTES_SUFFIX)
-      ? (JSON.parse(readFileSync(base + NOTES_SUFFIX, "utf8")) as Record<string, string>)
-      : {};
-    return { meta, source, notes };
+    return { meta: raw, source };
   }
 
   updateSource(project: string, planId: string, source: string): PlanRecord {
     const rec = this.readPlan(project, planId);
     if (!rec) throw new Error(`plan not found: ${project}/${planId}`);
-    if (rec.meta.status === "implemented") {
-      throw new Error("plan_frozen: implemented plans cannot be edited");
-    }
     rec.source = source;
     rec.meta.modified = new Date().toISOString();
     this.writePlan(rec);
     return rec;
-  }
-
-  setComment(project: string, planId: string, blockId: string, text: string): PlanRecord {
-    const rec = this.readPlan(project, planId);
-    if (!rec) throw new Error(`plan not found: ${project}/${planId}`);
-    if (rec.meta.status === "implemented") {
-      throw new Error("plan_frozen: implemented plans cannot accept comments");
-    }
-    rec.notes[blockId] = text;
-    const base = this.basePath(project, planId);
-    atomicWrite(base + NOTES_SUFFIX, JSON.stringify(rec.notes, null, 2));
-    return rec;
-  }
-
-  clearComment(project: string, planId: string, blockId: string): boolean {
-    const rec = this.readPlan(project, planId);
-    if (!rec) return false;
-    if (!(blockId in rec.notes)) return false;
-    delete rec.notes[blockId];
-    const base = this.basePath(project, planId);
-    atomicWrite(base + NOTES_SUFFIX, JSON.stringify(rec.notes, null, 2));
-    return true;
   }
 
   deletePlan(project: string, planId: string): boolean {
@@ -404,6 +225,8 @@ export class Storage {
       const p = base + ext;
       if (existsSync(p)) { rmSync(p); removed = true; }
     }
+    // also drop any comments scoped to this plan
+    this.clearCommentsForTarget(project, "plan", planId);
     return removed;
   }
 
@@ -431,7 +254,9 @@ export class Storage {
       if (!name.endsWith(META_SUFFIX)) continue;
       const full = join(dir, name);
       try {
-        metas.push(JSON.parse(readFileSync(full, "utf8")) as PlanMeta);
+        const raw = JSON.parse(readFileSync(full, "utf8")) as PlanMeta;
+        raw.status = migrateStatus(raw.status as unknown as string);
+        metas.push(raw);
       } catch {
         // skip corrupt
       }
@@ -439,6 +264,78 @@ export class Storage {
     return metas.sort((a, b) => (a.created < b.created ? 1 : -1));
   }
 
+  // ---------- comments (unified) ----------
+  private readComments(project: string): Comment[] {
+    const p = this.commentsPath(project);
+    if (!existsSync(p)) return [];
+    try {
+      const raw = JSON.parse(readFileSync(p, "utf8")) as Comment[];
+      return Array.isArray(raw) ? raw : [];
+    } catch { return []; }
+  }
+
+  private writeComments(project: string, comments: Comment[]) {
+    this.ensureProject(project);
+    atomicWrite(this.commentsPath(project), JSON.stringify(comments, null, 2));
+  }
+
+  listComments(project: string): Comment[] {
+    return this.readComments(project);
+  }
+
+  getComments(project: string, target_kind: CommentTargetKind, target_id: string): Comment[] {
+    return this.readComments(project).filter((c) => c.target_kind === target_kind && c.target_id === target_id);
+  }
+
+  setComment(project: string, target_kind: CommentTargetKind, target_id: string, block_id: string, text: string): Comment | null {
+    const comments = this.readComments(project);
+    const i = comments.findIndex((c) => c.target_kind === target_kind && c.target_id === target_id && c.block_id === block_id);
+    const now = new Date().toISOString();
+    if (text === "") {
+      if (i === -1) return null;
+      comments.splice(i, 1);
+      this.writeComments(project, comments);
+      return null;
+    }
+    if (i === -1) {
+      const c: Comment = { id: randomUUID(), target_kind, target_id, block_id, text, created: now, modified: now };
+      comments.push(c);
+      this.writeComments(project, comments);
+      return c;
+    }
+    comments[i] = { ...comments[i]!, text, modified: now };
+    this.writeComments(project, comments);
+    return comments[i]!;
+  }
+
+  clearComment(project: string, target_kind: CommentTargetKind, target_id: string, block_id: string): boolean {
+    const comments = this.readComments(project);
+    const i = comments.findIndex((c) => c.target_kind === target_kind && c.target_id === target_id && c.block_id === block_id);
+    if (i === -1) return false;
+    comments.splice(i, 1);
+    this.writeComments(project, comments);
+    return true;
+  }
+
+  clearCommentsForTarget(project: string, target_kind: CommentTargetKind, target_id: string): number {
+    const comments = this.readComments(project);
+    const before = comments.length;
+    const next = comments.filter((c) => !(c.target_kind === target_kind && c.target_id === target_id));
+    if (next.length === before) return 0;
+    this.writeComments(project, next);
+    return before - next.length;
+  }
+
+  // notes shaped for a target — convenience for HTML decoration
+  notesFor(project: string, target_kind: CommentTargetKind, target_id: string): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const c of this.readComments(project)) {
+      if (c.target_kind === target_kind && c.target_id === target_id) out[c.block_id] = c.text;
+    }
+    return out;
+  }
+
+  // ---------- components ----------
   appendComponent(project: string, name: string, source: string) {
     this.ensureProject(project);
     const path = this.componentsPath(project);
@@ -447,5 +344,92 @@ export class Storage {
       throw new Error(`component_exists: ${name}`);
     }
     atomicWrite(path, existing + "\n" + source.trim() + "\n");
+  }
+
+  // ---------- one-shot migration ----------
+  private migrateAll() {
+    const projectsDir = join(this.root, "projects");
+    if (!existsSync(projectsDir)) return;
+    for (const project of readdirSync(projectsDir)) {
+      const pd = join(projectsDir, project);
+      if (!statSync(pd).isDirectory()) continue;
+      this.migrateProject(project);
+    }
+  }
+
+  private migrateProject(project: string) {
+    // 1. Migrate plan meta.json statuses + drop legacy notes files (folding into comments.json)
+    const aggregated: Comment[] = this.readComments(project);
+    const seen = new Set(aggregated.map((c) => `${c.target_kind}|${c.target_id}|${c.block_id}`));
+    const now = new Date().toISOString();
+
+    const plansDir = this.plansDir(project);
+    if (existsSync(plansDir)) {
+      for (const name of readdirSync(plansDir)) {
+        const full = join(plansDir, name);
+        if (name.endsWith(META_SUFFIX)) {
+          try {
+            const raw = JSON.parse(readFileSync(full, "utf8")) as PlanMeta;
+            const next = migrateStatus(raw.status as unknown as string);
+            if (next !== raw.status) {
+              const updated: PlanMeta = { ...raw, status: next };
+              atomicWrite(full, JSON.stringify(updated, null, 2));
+              // also patch source's status="..."
+              const base = full.slice(0, -META_SUFFIX.length);
+              const sourcePath = base + SOURCE_SUFFIX;
+              if (existsSync(sourcePath)) {
+                const src = readFileSync(sourcePath, "utf8");
+                const patched = src.replace(/(<Plan\b[^>]*\sstatus=")([^"]+)(")/, (_m, a, _b, c) => `${a}${next}${c}`);
+                if (patched !== src) atomicWrite(sourcePath, patched);
+              }
+            }
+          } catch { /* skip */ }
+        }
+        if (name.endsWith(NOTES_SUFFIX)) {
+          // legacy per-plan notes — fold into comments.json
+          const planId = name.slice(0, -NOTES_SUFFIX.length);
+          try {
+            const notes = JSON.parse(readFileSync(full, "utf8")) as Record<string, string>;
+            for (const [block_id, text] of Object.entries(notes)) {
+              const key = `plan|${planId}|${block_id}`;
+              if (seen.has(key) || !text) continue;
+              aggregated.push({
+                id: randomUUID(), target_kind: "plan", target_id: planId,
+                block_id, text, created: now, modified: now,
+              });
+              seen.add(key);
+            }
+          } catch { /* skip */ }
+          rmSync(full);
+        }
+      }
+    }
+
+    // 2. Migrate per-tab notes
+    const tabsDir = this.tabsDir(project);
+    if (existsSync(tabsDir)) {
+      for (const name of readdirSync(tabsDir)) {
+        if (!name.endsWith(".tab.notes.json")) continue;
+        const tabId = name.slice(0, -".tab.notes.json".length);
+        const full = join(tabsDir, name);
+        try {
+          const notes = JSON.parse(readFileSync(full, "utf8")) as Record<string, string>;
+          for (const [block_id, text] of Object.entries(notes)) {
+            const key = `tab|${tabId}|${block_id}`;
+            if (seen.has(key) || !text) continue;
+            aggregated.push({
+              id: randomUUID(), target_kind: "tab", target_id: tabId,
+              block_id, text, created: now, modified: now,
+            });
+            seen.add(key);
+          }
+        } catch { /* skip */ }
+        rmSync(full);
+      }
+    }
+
+    if (aggregated.length > 0 || existsSync(this.commentsPath(project))) {
+      this.writeComments(project, aggregated);
+    }
   }
 }

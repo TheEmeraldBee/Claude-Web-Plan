@@ -4,11 +4,10 @@ import { extname, join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, projectSlugFromCwd } from "./config.js";
 import { state } from "./state.js";
-import { Storage } from "./storage.js";
+import { Storage, STATUSES, type CommentTargetKind, type PlanStatus } from "./storage.js";
 import { compilePlanFile, invalidate } from "./compile.js";
 import { buildTree } from "./layout.js";
 import { resolveTheme, themeToCSS } from "./themes.js";
-import { type CardBoard } from "./storage.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -26,12 +25,8 @@ const MIME: Record<string, string> = {
   ".png":  "image/png",
 };
 
-function uiRoot(): string {
-  return resolve(__dirname, "..", "..", "ui");
-}
-function kitRoot(): string {
-  return resolve(__dirname, "..", "..", "kit", "src");
-}
+function uiRoot(): string { return resolve(__dirname, "..", "..", "ui"); }
+function kitRoot(): string { return resolve(__dirname, "..", "..", "kit", "src"); }
 
 function send(res: ServerResponse, status: number, body: string | Buffer, headers: Record<string, string> = {}) {
   res.writeHead(status, { "content-type": "text/plain; charset=utf-8", ...headers });
@@ -41,6 +36,9 @@ function sendJson(res: ServerResponse, status: number, obj: unknown) {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(obj));
 }
+function jsonOk(res: ServerResponse, request_id: string | undefined, extra: Record<string, unknown> = {}) {
+  sendJson(res, 200, { ok: true, ...(request_id ? { request_id } : {}), ...extra });
+}
 
 async function readBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
@@ -49,10 +47,7 @@ async function readBody(req: IncomingMessage): Promise<string> {
 }
 
 function serveStatic(path: string, res: ServerResponse) {
-  if (!existsSync(path) || !statSync(path).isFile()) {
-    send(res, 404, "not found");
-    return;
-  }
+  if (!existsSync(path) || !statSync(path).isFile()) { send(res, 404, "not found"); return; }
   const ext = extname(path);
   res.writeHead(200, { "content-type": MIME[ext] ?? "application/octet-stream" });
   res.end(readFileSync(path));
@@ -67,19 +62,34 @@ function nowId(slug: string): string {
   return `${ts}-${slug}`;
 }
 
-function renderShell(title: string, body: string, hasMermaid: boolean, planMeta?: { id: string; project: string; status: string; notes: Record<string, string> }, extraScripts: string = "", projectSlug?: string): string {
+interface ShellExtras {
+  hasMermaid?: boolean;
+  planMeta?: { id: string; project: string; status: string; notes: Record<string, string> };
+  tabMeta?: { project: string; tabId: string };
+  pageMeta?: { kind: "plan" | "tab" | "layout" | "home" | "dashboard"; project?: string };
+  extraScripts?: string;
+  projectSlug?: string;
+}
+
+function renderShell(title: string, body: string, extras: ShellExtras = {}): string {
+  const { hasMermaid, planMeta, tabMeta, pageMeta, extraScripts, projectSlug } = extras;
   let themeStyle = "";
   if (projectSlug) {
     const theme = storage.getTheme(projectSlug);
     if (theme) themeStyle = `<style>${themeToCSS(resolveTheme(theme))}</style>\n`;
   }
+  const metaScripts = [
+    planMeta ? `<script>window.__PLAN__ = ${JSON.stringify(planMeta)};</script>` : "",
+    tabMeta  ? `<script>window.__TAB__  = ${JSON.stringify(tabMeta)};</script>`  : "",
+    pageMeta ? `<script>window.__PAGE__ = ${JSON.stringify(pageMeta)};</script>` : "",
+  ].filter(Boolean).join("\n");
   return `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8" />
 <title>${escapeHtml(title)}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <link rel="stylesheet" href="/kit/styles.css" />
-${themeStyle}${planMeta ? `<script>window.__PLAN__ = ${JSON.stringify(planMeta)};</script>` : ""}
+${themeStyle}${metaScripts}
 ${hasMermaid ? `<script type="module">
   import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
   mermaid.initialize({ startOnLoad: false, theme: "dark", themeVariables: { background: "#1e1e2e", primaryColor: "#313244", primaryTextColor: "#cdd6f4", lineColor: "#89b4fa" } });
@@ -91,8 +101,10 @@ ${hasMermaid ? `<script type="module">
 <script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/prismjs@1/plugins/autoloader/prism-autoloader.min.js"></script>
 <script>Prism.plugins.autoloader.languages_path = "https://cdn.jsdelivr.net/npm/prismjs@1/components/";</script>
+<script type="module" src="/ui/submit.js"></script>
+<script type="module" src="/ui/chrome.js"></script>
 <script type="module" src="/ui/app.js"></script>
-${extraScripts}
+${extraScripts ?? ""}
 </body></html>`;
 }
 
@@ -100,6 +112,7 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", "\"":"&quot;", "'":"&#39;" }[c]!));
 }
 
+// ---------- SSE ----------
 async function handleSse(req: IncomingMessage, res: ServerResponse) {
   res.writeHead(200, {
     "content-type": "text/event-stream",
@@ -111,18 +124,14 @@ async function handleSse(req: IncomingMessage, res: ServerResponse) {
   const id = state.addSubscriber((data) => {
     res.write(`data: ${JSON.stringify(data)}\n\n`);
   });
-  const heartbeat = setInterval(() => {
-    try { res.write(": heartbeat\n\n"); } catch { /* noop */ }
-  }, 15000);
-  req.on("close", () => {
-    clearInterval(heartbeat);
-    state.removeSubscriber(id);
-  });
+  const heartbeat = setInterval(() => { try { res.write(": heartbeat\n\n"); } catch { /* noop */ } }, 15000);
+  req.on("close", () => { clearInterval(heartbeat); state.removeSubscriber(id); });
 }
 
+// ---------- chat / answer ----------
 async function handleMessage(req: IncomingMessage, res: ServerResponse) {
   const body = await readBody(req);
-  let parsed: { text?: string; source?: string };
+  let parsed: { text?: string; source?: string; request_id?: string };
   try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
   const text = (parsed.text ?? "").trim();
   if (!text) return sendJson(res, 400, { error: "empty_text" });
@@ -131,110 +140,139 @@ async function handleMessage(req: IncomingMessage, res: ServerResponse) {
   const r = state.enqueueOrDeliver({ text: payload, kind: "chat", meta: { source } });
   if (r.delivered) state.broadcast({ type: "message:delivered", source });
   else state.broadcast({ type: "message:queued", source, position: r.position });
-  sendJson(res, 200, { ok: true, queued: r.queued, position: r.position });
+  state.ack(parsed.request_id, { route: "message", queued: r.queued });
+  jsonOk(res, parsed.request_id, { queued: r.queued, position: r.position });
 }
 
 async function handleAnswer(req: IncomingMessage, res: ServerResponse, askId: string) {
   const body = await readBody(req);
-  let parsed: { answers?: unknown[] };
+  let parsed: { answers?: unknown[]; request_id?: string };
   try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
   const p = state.pending.get(askId);
   if (!p || p.kind !== "ask_user") return sendJson(res, 404, { error: "unknown_ask_id" });
   state.pending.delete(askId);
   p.resolve({ questions: p.questions, answers: parsed.answers ?? [] });
-  sendJson(res, 200, { ok: true });
+  state.ack(parsed.request_id, { route: "answer" });
+  jsonOk(res, parsed.request_id);
 }
 
+// ---------- unified comments ----------
 async function handleComment(req: IncomingMessage, res: ServerResponse) {
   const body = await readBody(req);
-  let parsed: { project?: string; planId?: string; blockId?: string; text?: string };
+  let parsed: { project?: string; target_kind?: string; target_id?: string; block_id?: string; text?: string; request_id?: string };
   try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
-  const { project, planId, blockId, text } = parsed;
-  if (!project || !planId || !blockId || typeof text !== "string") return sendJson(res, 400, { error: "missing_fields" });
+  const { project, target_kind, target_id, block_id, text, request_id } = parsed;
+  if (!project || (target_kind !== "plan" && target_kind !== "tab") || !target_id || !block_id || typeof text !== "string") {
+    return sendJson(res, 400, { error: "missing_fields", expects: { project: "string", target_kind: "'plan'|'tab'", target_id: "string", block_id: "string", text: "string" } });
+  }
   try {
-    if (text === "") {
-      storage.clearComment(project, planId, blockId);
-      state.broadcast({ type: "comment:cleared", project, planId, blockId });
-    } else {
-      storage.setComment(project, planId, blockId, text);
-      state.broadcast({ type: "comment:set", project, planId, blockId });
-    }
-    sendJson(res, 200, { ok: true });
+    storage.setComment(project, target_kind as CommentTargetKind, target_id, block_id, text);
+    const type = text === "" ? "comment:cleared" : "comment:set";
+    state.broadcast({ type, project, target_kind, target_id, blockId: block_id, text });
+    state.ack(request_id, { route: "comment", target_kind, target_id, blockId: block_id });
+    jsonOk(res, request_id);
   } catch (e) {
-    sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) });
+    sendJson(res, 400, { error: e instanceof Error ? e.message : String(e), request_id });
   }
 }
 
+async function handleListComments(req: IncomingMessage, res: ServerResponse) {
+  const url = new URL(req.url ?? "/", `http://localhost:${config.port}`);
+  const project = url.searchParams.get("project");
+  if (!project) return sendJson(res, 400, { error: "missing_project" });
+  const meta = storage.readProject(project);
+  if (!meta) return sendJson(res, 404, { error: "project_not_found" });
+  const comments = storage.listComments(project);
+  const planTitles = new Map(storage.listPlans(project).map((p) => [p.id, p.title]));
+  const tabTitles = new Map(meta.tabs.map((t) => [t.id, t.title]));
+  const enriched = comments.map((c) => ({
+    ...c,
+    target_title: c.target_kind === "plan" ? planTitles.get(c.target_id) ?? null : tabTitles.get(c.target_id) ?? null,
+  }));
+  sendJson(res, 200, { project, count: enriched.length, comments: enriched });
+}
+
+// ---------- plan status / delete / feedback / start ----------
 async function handlePlanStatus(req: IncomingMessage, res: ServerResponse) {
   const body = await readBody(req);
-  let parsed: { project?: string; planId?: string; status?: string };
+  let parsed: { project?: string; planId?: string; status?: string; request_id?: string };
   try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
-  const { project, planId, status } = parsed;
+  const { project, planId, status, request_id } = parsed;
   if (!project || !planId || !status) return sendJson(res, 400, { error: "missing_fields" });
-  if (status !== "proposed" && status !== "approved" && status !== "implemented" && status !== "abandoned") {
-    return sendJson(res, 400, { error: "invalid_status" });
-  }
+  if (!(STATUSES as readonly string[]).includes(status)) return sendJson(res, 400, { error: "invalid_status", valid: STATUSES });
   const rec = storage.readPlan(project, planId);
   if (!rec) return sendJson(res, 404, { error: "plan_not_found" });
-  const next = storage.setStatus(project, planId, status as "proposed" | "approved" | "implemented" | "abandoned");
+  const next = storage.setStatus(project, planId, status as PlanStatus);
   state.broadcast({ type: "plan.status", planId, project, status: next.meta.status });
-  sendJson(res, 200, { ok: true, status: next.meta.status });
+  state.ack(request_id, { route: "plan/status", status: next.meta.status });
+  jsonOk(res, request_id, { status: next.meta.status });
 }
 
 async function handleDeletePlan(req: IncomingMessage, res: ServerResponse) {
   const body = await readBody(req);
-  let parsed: { project?: string; planId?: string };
+  let parsed: { project?: string; planId?: string; request_id?: string };
   try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
-  const { project, planId } = parsed;
+  const { project, planId, request_id } = parsed;
   if (!project || !planId) return sendJson(res, 400, { error: "missing_fields" });
   const rec = storage.readPlan(project, planId);
   if (!rec) return sendJson(res, 404, { error: "plan_not_found" });
   storage.deletePlan(project, planId);
   invalidate(storage.basePath(project, planId) + ".plan.tsx");
   state.broadcast({ type: "plan.deleted", planId, project });
-  sendJson(res, 200, { ok: true });
+  state.ack(request_id, { route: "plan/delete" });
+  jsonOk(res, request_id);
+}
+
+function buildFeedbackText(project: string, target_kind?: CommentTargetKind, target_id?: string): { ok: true; text: string; n: number } | { ok: false; error: string } {
+  const all = storage.listComments(project);
+  const filtered = !target_kind ? all : all.filter((c) => c.target_kind === target_kind && (target_id ? c.target_id === target_id : true));
+  if (filtered.length === 0) return { ok: false, error: "no_comments" };
+  const meta = storage.readProject(project);
+  const planTitles = new Map(storage.listPlans(project).map((p) => [p.id, p.title]));
+  const tabTitles  = new Map((meta?.tabs ?? []).map((t) => [t.id, t.title]));
+  const targets = new Set(filtered.map((c) => `${c.target_kind}:${c.target_id}`));
+  const header = `Feedback bundle (${filtered.length} comment${filtered.length === 1 ? "" : "s"} across ${targets.size} target${targets.size === 1 ? "" : "s"}):`;
+  const lines: string[] = [header, ""];
+  for (const c of filtered) {
+    const title = c.target_kind === "plan" ? planTitles.get(c.target_id) ?? c.target_id : tabTitles.get(c.target_id) ?? c.target_id;
+    lines.push(`[${c.target_kind}: ${title}] [${c.block_id}] ${c.text}`);
+  }
+  lines.push("", "Please revise.");
+  return { ok: true, text: lines.join("\n"), n: filtered.length };
 }
 
 async function handleFeedback(req: IncomingMessage, res: ServerResponse) {
   const body = await readBody(req);
-  let parsed: { project?: string; planId?: string };
+  let parsed: { project?: string; target_kind?: CommentTargetKind; target_id?: string; request_id?: string };
   try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
-  if (!parsed.project || !parsed.planId) return sendJson(res, 400, { error: "missing_fields" });
-  const rec = storage.readPlan(parsed.project, parsed.planId);
-  if (!rec) return sendJson(res, 404, { error: "plan_not_found" });
-  const lines: string[] = [
-    `Feedback on plan "${rec.meta.title}":`,
-    "",
-  ];
-  const entries = Object.entries(rec.notes);
-  if (entries.length === 0) return sendJson(res, 400, { error: "no_comments" });
-  for (const [blockId, comment] of entries) {
-    lines.push(`[${blockId}] ${comment}`);
-  }
-  lines.push("", "Please revise.");
-  const text = lines.join("\n");
-  const r = state.enqueueOrDeliver({ text, kind: "feedback", meta: { planId: parsed.planId, project: parsed.project } });
-  state.broadcast({ type: "feedback:sent", planId: parsed.planId, queued: r.queued, position: r.position });
-  sendJson(res, 200, { ok: true, queued: r.queued, position: r.position });
+  const { project, target_kind, target_id, request_id } = parsed;
+  if (!project) return sendJson(res, 400, { error: "missing_fields" });
+  const built = buildFeedbackText(project, target_kind, target_id);
+  if (!built.ok) return sendJson(res, 400, { error: built.error });
+  const r = state.enqueueOrDeliver({ text: built.text, kind: "feedback", meta: { project, target_kind, target_id } });
+  state.broadcast({ type: "feedback:sent", project, target_kind, target_id, queued: r.queued, position: r.position, count: built.n });
+  state.ack(request_id, { route: "feedback", queued: r.queued });
+  jsonOk(res, request_id, { queued: r.queued, position: r.position, count: built.n });
 }
 
 async function handleStartImplementation(req: IncomingMessage, res: ServerResponse) {
   const body = await readBody(req);
-  let parsed: { project?: string; planId?: string };
+  let parsed: { project?: string; planId?: string; request_id?: string };
   try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
-  if (!parsed.project || !parsed.planId) return sendJson(res, 400, { error: "missing_fields" });
-  const rec = storage.readPlan(parsed.project, parsed.planId);
+  const { project, planId, request_id } = parsed;
+  if (!project || !planId) return sendJson(res, 400, { error: "missing_fields" });
+  const rec = storage.readPlan(project, planId);
   if (!rec) return sendJson(res, 404, { error: "plan_not_found" });
-  if (rec.meta.status === "implemented") return sendJson(res, 409, { error: "plan_already_implemented" });
-  const next = storage.setStatus(parsed.project, parsed.planId, "approved");
-  state.broadcast({ type: "plan.status", planId: parsed.planId, project: parsed.project, status: next.meta.status });
-  const text = [
-    `Start implementation of plan "${rec.meta.title}" (id: ${parsed.planId}).`,
-    `No comments — proceed.`,
-  ].join("\n");
-  const r = state.enqueueOrDeliver({ text, kind: "implementation", meta: { planId: parsed.planId, project: parsed.project } });
-  state.broadcast({ type: "implementation:started", planId: parsed.planId, queued: r.queued, position: r.position });
-  sendJson(res, 200, { ok: true, queued: r.queued, position: r.position });
+  const next = storage.setStatus(project, planId, "ready");
+  state.broadcast({ type: "plan.status", planId, project, status: next.meta.status });
+  const planComments = storage.getComments(project, "plan", planId);
+  const text = planComments.length > 0
+    ? buildFeedbackText(project, "plan", planId).ok ? (buildFeedbackText(project, "plan", planId) as { ok: true; text: string }).text : `Start implementation of plan "${rec.meta.title}" (id: ${planId}).`
+    : [`Start implementation of plan "${rec.meta.title}" (id: ${planId}).`, `No comments — proceed.`].join("\n");
+  const r = state.enqueueOrDeliver({ text, kind: "implementation", meta: { planId, project } });
+  state.broadcast({ type: "implementation:started", planId, project, queued: r.queued, position: r.position });
+  state.ack(request_id, { route: "start-implementation", queued: r.queued });
+  jsonOk(res, request_id, { queued: r.queued, position: r.position });
 }
 
 async function handlePlansList(_req: IncomingMessage, res: ServerResponse) {
@@ -243,20 +281,22 @@ async function handlePlansList(_req: IncomingMessage, res: ServerResponse) {
   sendJson(res, 200, out);
 }
 
+// ---------- pages ----------
 async function handlePlanPage(_req: IncomingMessage, res: ServerResponse, project: string, planId: string) {
   const rec = storage.readPlan(project, planId);
   if (!rec) return send(res, 404, "plan not found");
   const sourcePath = join(storage.basePath(project, planId) + ".plan.tsx");
+  const notes = storage.notesFor(project, "plan", planId);
   try {
     const { html, hasMermaid } = await compilePlanFile(sourcePath);
-    const decorated = decorateWithNotes(html, rec.notes);
+    const decorated = decorateWithNotes(html, notes);
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    res.end(renderShell(rec.meta.title, decorated, hasMermaid, {
-      id: rec.meta.id,
-      project: rec.meta.project,
-      status: rec.meta.status,
-      notes: rec.notes,
-    }, "", rec.meta.project));
+    res.end(renderShell(rec.meta.title, decorated, {
+      hasMermaid,
+      planMeta: { id: rec.meta.id, project: rec.meta.project, status: rec.meta.status, notes },
+      pageMeta: { kind: "plan", project: rec.meta.project },
+      projectSlug: rec.meta.project,
+    }));
   } catch (e) {
     res.writeHead(500, { "content-type": "text/html; charset=utf-8" });
     res.end(`<pre>${escapeHtml(e instanceof Error ? e.message : String(e))}</pre>`);
@@ -266,7 +306,7 @@ async function handlePlanPage(_req: IncomingMessage, res: ServerResponse, projec
 function decorateWithNotes(html: string, notes: Record<string, string>): string {
   return html.replace(/<section\s+class="block"\s+data-block-id="([^"]+)"/g, (m, id: string) => {
     if (!notes[id]) return m;
-    return `${m} data-has-comment="true" data-comment-text="${escapeHtml(notes[id])}"`;
+    return `${m} data-has-comment="true" data-comment-text="${escapeHtml(notes[id]!)}"`;
   });
 }
 
@@ -282,7 +322,7 @@ async function handleDashboard(_req: IncomingMessage, res: ServerResponse) {
         ${projects.map((p) => {
           const meta = storage.readProject(p);
           const plans = storage.listPlans(p);
-          const inProgress = plans.filter((pl) => pl.status === "proposed" || pl.status === "approved").length;
+          const active = plans.filter((pl) => pl.status === "designing" || pl.status === "ready").length;
           const done = plans.filter((pl) => pl.status === "implemented").length;
           const latest = plans[0];
           return `<a class="project-card" href="/projects/${encodeURIComponent(p)}">
@@ -291,7 +331,7 @@ async function handleDashboard(_req: IncomingMessage, res: ServerResponse) {
             <div class="project-stats">
               <span><strong>${plans.length}</strong> plan${plans.length === 1 ? "" : "s"}</span>
               <span class="dot">·</span>
-              <span class="status-proposed">${inProgress} active</span>
+              <span class="status-designing">${active} active</span>
               <span class="dot">·</span>
               <span class="status-implemented">${done} done</span>
             </div>
@@ -301,7 +341,7 @@ async function handleDashboard(_req: IncomingMessage, res: ServerResponse) {
       </div>
     </main>`;
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-  res.end(renderShell("web-planner", body, false));
+  res.end(renderShell("web-planner", body, { pageMeta: { kind: "dashboard" } }));
 }
 
 function renderTabBar(active: string, tabs: { id: string; title: string; kind: string }[]): string {
@@ -313,11 +353,11 @@ function renderTabBar(active: string, tabs: { id: string; title: string; kind: s
 async function renderBuiltinTab(project: string, tabId: string): Promise<string> {
   if (tabId === "plans") {
     const plans = storage.listPlans(project);
-    const COLUMNS: { status: "proposed" | "approved" | "implemented" | "abandoned"; label: string }[] = [
-      { status: "proposed", label: "Proposed" },
-      { status: "approved", label: "Approved" },
+    const COLUMNS: { status: PlanStatus; label: string }[] = [
+      { status: "designing", label: "Designing" },
+      { status: "ready", label: "Ready" },
       { status: "implemented", label: "Implemented" },
-      { status: "abandoned", label: "Abandoned" },
+      { status: "rejected", label: "Rejected" },
     ];
     const empty = plans.length === 0 ? `
       <div class="plans-empty-state">
@@ -339,7 +379,7 @@ async function renderBuiltinTab(project: string, tabId: string): Promise<string>
               <span class="plan-title">${escapeHtml(p.title)}</span>
               <span class="when">${escapeHtml(p.modified.slice(0,16))}</span>
             </a>
-            <button type="button" class="plan-row-delete" data-plan-id="${escapeHtml(p.id)}" data-plan-title="${escapeHtml(p.title)}" data-plan-status="${escapeHtml(p.status)}" title="delete plan">×</button>
+            <button type="button" class="plan-row-delete" data-plan-id="${escapeHtml(p.id)}" data-plan-title="${escapeHtml(p.title)}" title="delete plan">×</button>
           </div>`).join("")}
         </div>
       </section>`;
@@ -366,7 +406,7 @@ async function renderCustomTab(project: string, tabId: string): Promise<string> 
   const path = storage.tabPath(project, tabId);
   if (!existsSync(path)) return `<p class="muted">tab source missing</p>`;
   const compiled = await compilePlanFile(path);
-  const notes = storage.readTabNotes(project, tabId);
+  const notes = storage.notesFor(project, "tab", tabId);
   return decorateWithNotes(compiled.html, notes);
 }
 
@@ -382,7 +422,6 @@ async function handleProjectPage(req: IncomingMessage, res: ServerResponse, proj
   let hasMermaid = false;
   try {
     if (tab.kind === "builtin") tabBody = await renderBuiltinTab(project, tab.id);
-    else if (tab.kind === "board") tabBody = renderBoardTab(project, tab.id);
     else {
       tabBody = await renderCustomTab(project, tab.id);
       hasMermaid = /data-mermaid/.test(tabBody);
@@ -402,50 +441,19 @@ async function handleProjectPage(req: IncomingMessage, res: ServerResponse, proj
     ${renderTabBar(tab.id, meta.tabs)}
     <div class="tab-panel" data-tab-panel>${tabBody}</div>
   </main>`;
-  const tabMeta = tab.kind === "custom" ? `<script>window.__TAB__ = ${JSON.stringify({ project, tabId: tab.id })};</script>` : "";
+  const tabMeta = tab.kind === "custom" ? { project, tabId: tab.id } : undefined;
+  const pageKind: "home" | "layout" | "tab" = tab.id === "home" ? "home" : tab.id === "layout" ? "layout" : "tab";
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-  res.end(renderShell(`${meta.name || project} — web-planner`, body, hasMermaid, undefined, `${tabMeta}<script type="module" src="/ui/project.js"></script>`, project));
+  res.end(renderShell(`${meta.name || project} — web-planner`, body, {
+    hasMermaid,
+    tabMeta,
+    pageMeta: { kind: pageKind, project },
+    extraScripts: `<script type="module" src="/ui/project.js"></script>`,
+    projectSlug: project,
+  }));
 }
 
-function renderBoardTab(project: string, boardId: string): string {
-  const board = storage.readCardBoard(project, boardId);
-  if (!board) return `<p class="muted">Board not found: ${escapeHtml(boardId)}</p>`;
-  const cols = board.statuses.map((status) => {
-    const cards = board.cards.filter((c) => c.status === status);
-    const cardHtml = cards.map((c) => {
-      const cardUrl = `/boards/${encodeURIComponent(project)}/${encodeURIComponent(boardId)}/cards/${encodeURIComponent(c.id)}`;
-      const otherStatuses = board.statuses.filter((s) => s !== status);
-      const quickMoveOpts = otherStatuses.map((s) =>
-        `<button type="button" class="card-quick-move" data-card-id="${escapeHtml(c.id)}" data-board-id="${escapeHtml(boardId)}" data-project="${escapeHtml(project)}" data-status="${escapeHtml(s)}">${escapeHtml(s)}</button>`
-      ).join("");
-      return `
-      <div class="card-item" data-card-id="${escapeHtml(c.id)}" data-board-id="${escapeHtml(boardId)}" data-project="${escapeHtml(project)}">
-        <a class="card-item-link" href="${cardUrl}">
-          <div class="card-item-title">${escapeHtml(c.title)}</div>
-          ${c.body ? `<div class="card-item-body">${escapeHtml(c.body)}</div>` : ""}
-        </a>
-        ${otherStatuses.length > 0 ? `<div class="card-item-footer"><div class="card-quick-move-wrap">${quickMoveOpts}</div></div>` : ""}
-      </div>`;
-    }).join("");
-    return `<div class="card-col" data-status="${escapeHtml(status)}">
-      <header class="card-col-head">
-        <h4>${escapeHtml(status)}</h4>
-        <span class="muted small">${cards.length}</span>
-      </header>
-      <div class="card-col-body">${cardHtml}</div>
-      <button type="button" class="card-col-add" data-board-id="${escapeHtml(boardId)}" data-status="${escapeHtml(status)}" data-project="${escapeHtml(project)}">+ Add card</button>
-    </div>`;
-  }).join("");
-  return `<div class="card-board" data-board-id="${escapeHtml(boardId)}" data-project="${escapeHtml(project)}">
-    <header class="card-board-header">
-      <span class="card-board-title">${escapeHtml(board.title)}</span>
-      <button type="button" class="card-board-edit-btn" data-board-id="${escapeHtml(boardId)}" data-project="${escapeHtml(project)}" title="Edit columns">⚙ Edit columns</button>
-    </header>
-    ${cols}
-  </div>`;
-}
-
-async function handleProjectTabFragment(req: IncomingMessage, res: ServerResponse, project: string, tabId: string) {
+async function handleProjectTabFragment(_req: IncomingMessage, res: ServerResponse, project: string, tabId: string) {
   const meta = storage.readProject(project);
   if (!meta) return send(res, 404, "project not found");
   const tab = meta.tabs.find((t) => t.id === tabId);
@@ -453,7 +461,6 @@ async function handleProjectTabFragment(req: IncomingMessage, res: ServerRespons
   try {
     let body: string;
     if (tab.kind === "builtin") body = await renderBuiltinTab(project, tab.id);
-    else if (tab.kind === "board") body = renderBoardTab(project, tab.id);
     else body = await renderCustomTab(project, tab.id);
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(body);
@@ -474,22 +481,27 @@ async function handleState(_req: IncomingMessage, res: ServerResponse) {
   sendJson(res, 200, state.activity);
 }
 
+async function handleBacklog(_req: IncomingMessage, res: ServerResponse) {
+  sendJson(res, 200, { backlog: state.peekBacklog().map((b) => ({ kind: b.kind, meta: b.meta ?? null })) });
+}
+
 async function handleGenerateBlock(req: IncomingMessage, res: ServerResponse) {
   const body = await readBody(req);
-  let parsed: { planId?: string; prompt?: string; project?: string };
+  let parsed: { planId?: string; prompt?: string; project?: string; request_id?: string };
   try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
-  const { planId, prompt, project } = parsed;
+  const { planId, prompt, project, request_id } = parsed;
   if (!planId || !prompt) return sendJson(res, 400, { error: "missing_fields" });
   const text = `[generate-block planId=${planId}${project ? ` project=${project}` : ""}]\n${prompt}`;
   const r = state.enqueueOrDeliver({ text, kind: "chat", meta: { planId, project } });
-  sendJson(res, 200, { ok: true, queued: r.queued });
+  state.ack(request_id, { route: "generate-block", queued: r.queued });
+  jsonOk(res, request_id, { queued: r.queued });
 }
 
 async function handleCreatePlanStub(req: IncomingMessage, res: ServerResponse) {
   const body = await readBody(req);
-  let parsed: { title?: string; brief?: string; project?: string };
+  let parsed: { title?: string; brief?: string; project?: string; request_id?: string };
   try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
-  const { title, brief, project: proj } = parsed;
+  const { title, brief, project: proj, request_id } = parsed;
   if (!title || !brief) return sendJson(res, 400, { error: "missing_fields" });
   const project = proj || "default";
   const slug = slugify(title);
@@ -497,248 +509,31 @@ async function handleCreatePlanStub(req: IncomingMessage, res: ServerResponse) {
   const now = new Date().toISOString();
   const escapedTitle = title.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   const escapedBrief = brief.replace(/[<>&]/g, (c: string) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]!));
-  const source = `import { Plan, Block, Callout } from "@web-planner/kit";\n\nexport default () => (\n  <Plan title="${escapedTitle}" status="proposed">\n    <Block id="b-brief" kind="summary">\n      <Callout>${escapedBrief}</Callout>\n    </Block>\n  </Plan>\n);\n`;
-  storage.writePlan({ meta: { id, title, slug, status: "proposed", created: now, modified: now, project }, source, notes: {} });
+  const source = `import { Plan, Block, Callout } from "@web-planner/kit";\n\nexport default () => (\n  <Plan title="${escapedTitle}" status="designing">\n    <Block id="b-brief" kind="summary">\n      <Callout>${escapedBrief}</Callout>\n    </Block>\n  </Plan>\n);\n`;
+  storage.writePlan({ meta: { id, title, slug, status: "designing", created: now, modified: now, project }, source });
   state.broadcast({ type: "plan.created", planId: id, project });
   const text = `[expand-plan planId=${id}]\n${brief}`;
   const r = state.enqueueOrDeliver({ text, kind: "chat", meta: { planId: id, project } });
   const url = `http://localhost:${config.port}/plans/${encodeURIComponent(project)}/${encodeURIComponent(id)}`;
-  sendJson(res, 200, { ok: true, planId: id, url, queued: r.queued });
-}
-
-async function handleBoardCreateCard(req: IncomingMessage, res: ServerResponse) {
-  const body = await readBody(req);
-  let parsed: { project?: string; boardId?: string; title?: string; body?: string; status?: string };
-  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
-  const { project, boardId, title, body: cardBody, status } = parsed;
-  if (!project || !boardId || !title || !status) return sendJson(res, 400, { error: "missing_fields" });
-  try {
-    const card = storage.addCard(project, boardId, title, cardBody ?? "", status);
-    state.broadcast({ type: "board:changed", project, boardId });
-    sendJson(res, 200, { ok: true, card_id: card.id });
-  } catch (e) { sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) }); }
-}
-
-async function handleBoardUpdateCard(req: IncomingMessage, res: ServerResponse) {
-  const body = await readBody(req);
-  let parsed: { project?: string; boardId?: string; cardId?: string; title?: string; body?: string; status?: string };
-  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
-  const { project, boardId, cardId, ...patch } = parsed;
-  if (!project || !boardId || !cardId) return sendJson(res, 400, { error: "missing_fields" });
-  try {
-    const card = storage.updateCard(project, boardId, cardId, patch as { title?: string; body?: string; status?: string });
-    state.broadcast({ type: "board:changed", project, boardId });
-    sendJson(res, 200, { ok: true, card_id: card.id });
-  } catch (e) { sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) }); }
-}
-
-async function handleBoardDeleteCard(req: IncomingMessage, res: ServerResponse) {
-  const body = await readBody(req);
-  let parsed: { project?: string; boardId?: string; cardId?: string };
-  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
-  const { project, boardId, cardId } = parsed;
-  if (!project || !boardId || !cardId) return sendJson(res, 400, { error: "missing_fields" });
-  try {
-    const removed = storage.deleteCard(project, boardId, cardId);
-    state.broadcast({ type: "board:changed", project, boardId });
-    sendJson(res, 200, { ok: true, deleted: removed });
-  } catch (e) { sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) }); }
-}
-
-async function handleTabComment(req: IncomingMessage, res: ServerResponse) {
-  const body = await readBody(req);
-  let parsed: { project?: string; tabId?: string; blockId?: string; text?: string };
-  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
-  const { project, tabId, blockId, text } = parsed;
-  if (!project || !tabId || !blockId || typeof text !== "string") return sendJson(res, 400, { error: "missing_fields" });
-  try {
-    storage.setTabComment(project, tabId, blockId, text);
-    const type = text === "" ? "tab:comment:cleared" : "tab:comment:set";
-    state.broadcast({ type, project, tabId, blockId });
-    sendJson(res, 200, { ok: true });
-  } catch (e) {
-    sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) });
-  }
-}
-
-async function handleBoardCreate(req: IncomingMessage, res: ServerResponse) {
-  const body = await readBody(req);
-  let parsed: { project?: string; title?: string; id?: string; statuses?: string[] };
-  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
-  const { title, statuses, id: rawId } = parsed;
-  if (!title || !statuses || !Array.isArray(statuses) || statuses.length === 0) {
-    return sendJson(res, 400, { error: "missing_fields" });
-  }
-  const project = parsed.project || projectSlugFromCwd();
-  const id = rawId || slugify(title);
-  try {
-    const board = storage.createCardBoard(project, id, title, statuses);
-    state.broadcast({ type: "project.updated", project });
-    sendJson(res, 200, { ok: true, board_id: board.id, title: board.title, statuses: board.statuses });
-  } catch (e) {
-    sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) });
-  }
-}
-
-async function handleBoardUpdateStatuses(req: IncomingMessage, res: ServerResponse) {
-  const body = await readBody(req);
-  let parsed: { project?: string; boardId?: string; statuses?: string[] };
-  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
-  const { boardId, statuses } = parsed;
-  if (!boardId || !statuses || !Array.isArray(statuses) || statuses.length === 0) {
-    return sendJson(res, 400, { error: "missing_fields" });
-  }
-  const project = parsed.project || projectSlugFromCwd();
-  try {
-    const board = storage.updateBoardStatuses(project, boardId, statuses);
-    state.broadcast({ type: "board:changed", project, boardId });
-    sendJson(res, 200, { ok: true, statuses: board.statuses });
-  } catch (e) {
-    sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) });
-  }
-}
-
-const CARD_STUB_SOURCE = (_title: string, body: string) =>
-  `import { Block, Callout } from "@web-planner/kit";\n\nexport default () => (\n  <div class="plan-blocks">\n    <Block id="b-brief" kind="summary">\n      <Callout>${body.replace(/[<>&]/g, (c: string) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]!))}</Callout>\n    </Block>\n  </div>\n);\n`;
-
-async function handleCardPage(_req: IncomingMessage, res: ServerResponse, project: string, boardId: string, cardId: string) {
-  const board = storage.readCardBoard(project, boardId);
-  if (!board) return send(res, 404, "board not found");
-  const card = board.cards.find((c) => c.id === cardId);
-  if (!card) return send(res, 404, "card not found");
-  const notes = storage.readCardNotes(project, boardId, cardId);
-  let source = storage.readCardSource(project, boardId, cardId);
-  if (!source) {
-    source = CARD_STUB_SOURCE(card.title, card.body || card.title);
-    storage.writeCardSource(project, boardId, cardId, source);
-  }
-  const sourcePath = storage.cardSourcePath(project, boardId, cardId);
-  try {
-    const { html, hasMermaid } = await compilePlanFile(sourcePath);
-    const decorated = decorateWithNotes(html, notes);
-    const cardMeta = { id: cardId, boardId, project, title: card.title, status: card.status, statuses: board.statuses, notes };
-    const body = `<main class="card-page plan" data-card-id="${escapeHtml(cardId)}" data-board-id="${escapeHtml(boardId)}" data-project="${escapeHtml(project)}">
-      <header class="plan-header card-page-header">
-        <div>
-          <h1 class="card-page-title" contenteditable="true" data-card-title="${escapeHtml(card.title)}">${escapeHtml(card.title)}</h1>
-          <div class="card-page-meta">
-            <span class="card-status-pill" data-statuses="${escapeHtml(JSON.stringify(board.statuses))}">${escapeHtml(card.status)}</span>
-          </div>
-        </div>
-        <div class="plan-meta">
-          <a class="badge plan-back-btn" href="/projects/${encodeURIComponent(project)}?tab=${encodeURIComponent(boardId)}">← back to board</a>
-        </div>
-      </header>
-      ${decorated}
-    </main>`;
-    const cardScript = `<script>window.__CARD__ = ${JSON.stringify(cardMeta)};</script>`;
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    res.end(renderShell(card.title + " — " + board.title, body, hasMermaid, undefined, cardScript, project));
-  } catch (e) {
-    res.writeHead(500, { "content-type": "text/html; charset=utf-8" });
-    res.end(`<pre>${escapeHtml(e instanceof Error ? e.message : String(e))}</pre>`);
-  }
-}
-
-async function handleCardComment(req: IncomingMessage, res: ServerResponse) {
-  const body = await readBody(req);
-  let parsed: { project?: string; boardId?: string; cardId?: string; blockId?: string; text?: string };
-  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
-  const { project, boardId, cardId, blockId, text } = parsed;
-  if (!project || !boardId || !cardId || !blockId || typeof text !== "string") return sendJson(res, 400, { error: "missing_fields" });
-  try {
-    storage.setCardComment(project, boardId, cardId, blockId, text);
-    const type = text === "" ? "card:comment:cleared" : "card:comment:set";
-    state.broadcast({ type, project, boardId, cardId, blockId, text });
-    sendJson(res, 200, { ok: true });
-  } catch (e) {
-    sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) });
-  }
-}
-
-async function handleCardFeedback(req: IncomingMessage, res: ServerResponse) {
-  const body = await readBody(req);
-  let parsed: { project?: string; boardId?: string; cardId?: string };
-  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
-  const { project, boardId, cardId } = parsed;
-  if (!project || !boardId || !cardId) return sendJson(res, 400, { error: "missing_fields" });
-  const board = storage.readCardBoard(project, boardId);
-  if (!board) return sendJson(res, 404, { error: "board_not_found" });
-  const card = board.cards.find((c) => c.id === cardId);
-  if (!card) return sendJson(res, 404, { error: "card_not_found" });
-  const notes = storage.readCardNotes(project, boardId, cardId);
-  const entries = Object.entries(notes);
-  if (entries.length === 0) return sendJson(res, 400, { error: "no_comments" });
-  const lines: string[] = [`Feedback on card "${card.title}" (cardId=${cardId} boardId=${boardId}):`, ""];
-  for (const [blockId, comment] of entries) lines.push(`[${blockId}] ${comment}`);
-  lines.push("", "Please revise.");
-  const text = lines.join("\n");
-  const r = state.enqueueOrDeliver({ text, kind: "chat", meta: { cardId, boardId, project } });
-  sendJson(res, 200, { ok: true, queued: r.queued, position: r.position });
-}
-
-async function handleCreateCardStub(req: IncomingMessage, res: ServerResponse) {
-  const body = await readBody(req);
-  let parsed: { project?: string; boardId?: string; title?: string; brief?: string; status?: string };
-  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
-  const { boardId, title, brief, status } = parsed;
-  const project = parsed.project || projectSlugFromCwd();
-  if (!boardId || !title || !brief) return sendJson(res, 400, { error: "missing_fields" });
-  const board = storage.readCardBoard(project, boardId);
-  if (!board) return sendJson(res, 404, { error: "board_not_found" });
-  const cardStatus = status && board.statuses.includes(status) ? status : board.statuses[0]!;
-  const card = storage.addCard(project, boardId, title, brief, cardStatus);
-  const source = CARD_STUB_SOURCE(title, brief);
-  storage.writeCardSource(project, boardId, card.id, source);
-  state.broadcast({ type: "board:changed", project, boardId });
-  const text = `[expand-card cardId=${card.id} boardId=${boardId}]\n${brief}`;
-  const r = state.enqueueOrDeliver({ text, kind: "chat", meta: { cardId: card.id, boardId, project } });
-  const url = `/boards/${encodeURIComponent(project)}/${encodeURIComponent(boardId)}/cards/${encodeURIComponent(card.id)}`;
-  sendJson(res, 200, { ok: true, cardId: card.id, url, queued: r.queued });
-}
-
-async function handleCardGenerateBlock(req: IncomingMessage, res: ServerResponse) {
-  const body = await readBody(req);
-  let parsed: { project?: string; boardId?: string; cardId?: string; prompt?: string };
-  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
-  const { boardId, cardId, prompt, project: proj } = parsed;
-  if (!boardId || !cardId || !prompt) return sendJson(res, 400, { error: "missing_fields" });
-  const project = proj || projectSlugFromCwd();
-  const text = `[generate-card-block cardId=${cardId} boardId=${boardId} project=${project}]\n${prompt}`;
-  const r = state.enqueueOrDeliver({ text, kind: "chat", meta: { cardId, boardId, project } });
-  sendJson(res, 200, { ok: true, queued: r.queued });
-}
-
-async function handleCardDelete(req: IncomingMessage, res: ServerResponse) {
-  const body = await readBody(req);
-  let parsed: { project?: string; boardId?: string; cardId?: string };
-  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
-  const { project, boardId, cardId } = parsed;
-  if (!project || !boardId || !cardId) return sendJson(res, 400, { error: "missing_fields" });
-  try {
-    storage.deleteCard(project, boardId, cardId);
-    storage.deleteCardFiles(project, boardId, cardId);
-    state.broadcast({ type: "board:changed", project, boardId });
-    sendJson(res, 200, { ok: true });
-  } catch (e) {
-    sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) });
-  }
+  state.ack(request_id, { route: "create-plan-stub", planId: id });
+  jsonOk(res, request_id, { planId: id, url, queued: r.queued });
 }
 
 async function handleCreateTab(req: IncomingMessage, res: ServerResponse) {
   const body = await readBody(req);
-  let parsed: { project?: string; title?: string; purpose?: string };
+  let parsed: { project?: string; title?: string; purpose?: string; request_id?: string };
   try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
-  const { title, purpose } = parsed;
+  const { title, purpose, request_id } = parsed;
   if (!title || !purpose) return sendJson(res, 400, { error: "missing_fields" });
   const project = parsed.project || projectSlugFromCwd();
   const text = `Create a new tab titled "${title}": ${purpose}`;
   const r = state.enqueueOrDeliver({ text, kind: "chat", meta: { source: "new-tab-modal", project } });
-  sendJson(res, 200, { ok: true, queued: r.queued, position: r.position });
+  state.ack(request_id, { route: "create-tab", queued: r.queued });
+  jsonOk(res, request_id, { queued: r.queued, position: r.position });
 }
 
+// ---------- router ----------
 async function router(req: IncomingMessage, res: ServerResponse) {
-  // Localhost-only.
   const remote = req.socket.remoteAddress ?? "";
   if (!remote.includes("127.0.0.1") && !remote.includes("::1") && remote !== "::ffff:127.0.0.1") {
     return send(res, 403, "localhost only");
@@ -750,7 +545,9 @@ async function router(req: IncomingMessage, res: ServerResponse) {
     if (m === "GET" && url.pathname === "/") return handleDashboard(req, res);
     if (m === "GET" && url.pathname === "/api/stream") return handleSse(req, res);
     if (m === "GET" && url.pathname === "/api/state") return handleState(req, res);
+    if (m === "GET" && url.pathname === "/api/backlog") return handleBacklog(req, res);
     if (m === "GET" && url.pathname === "/api/plans") return handlePlansList(req, res);
+    if (m === "GET" && url.pathname === "/api/comments") return handleListComments(req, res);
 
     const layoutMatch = url.pathname.match(/^\/api\/layout\/([^/]+)$/);
     if (m === "GET" && layoutMatch) return handleLayoutApi(req, res, layoutMatch[1] as string);
@@ -769,23 +566,9 @@ async function router(req: IncomingMessage, res: ServerResponse) {
     if (m === "POST" && url.pathname === "/api/plan/delete") return handleDeletePlan(req, res);
     if (m === "POST" && url.pathname === "/api/generate-block") return handleGenerateBlock(req, res);
     if (m === "POST" && url.pathname === "/api/create-plan-stub") return handleCreatePlanStub(req, res);
-    if (m === "POST" && url.pathname === "/api/board/create") return handleBoardCreate(req, res);
-    if (m === "POST" && url.pathname === "/api/board/update-statuses") return handleBoardUpdateStatuses(req, res);
-    if (m === "POST" && url.pathname === "/api/board/create-card") return handleBoardCreateCard(req, res);
-    if (m === "POST" && url.pathname === "/api/board/update-card") return handleBoardUpdateCard(req, res);
-    if (m === "POST" && url.pathname === "/api/board/delete-card") return handleBoardDeleteCard(req, res);
-    if (m === "POST" && url.pathname === "/api/tab-comment") return handleTabComment(req, res);
     if (m === "POST" && url.pathname === "/api/create-tab") return handleCreateTab(req, res);
-    if (m === "POST" && url.pathname === "/api/card-comment") return handleCardComment(req, res);
-    if (m === "POST" && url.pathname === "/api/card-feedback") return handleCardFeedback(req, res);
-    if (m === "POST" && url.pathname === "/api/create-card-stub") return handleCreateCardStub(req, res);
-    if (m === "POST" && url.pathname === "/api/card-generate-block") return handleCardGenerateBlock(req, res);
-    if (m === "POST" && url.pathname === "/api/card-delete") return handleCardDelete(req, res);
     const ansMatch = url.pathname.match(/^\/api\/answer\/([\w-]+)$/);
     if (m === "POST" && ansMatch) return handleAnswer(req, res, ansMatch[1] as string);
-
-    const cardPageMatch = url.pathname.match(/^\/boards\/([^/]+)\/([^/]+)\/cards\/([^/]+)$/);
-    if (m === "GET" && cardPageMatch) return handleCardPage(req, res, cardPageMatch[1] as string, cardPageMatch[2] as string, cardPageMatch[3] as string);
 
     const planMatch = url.pathname.match(/^\/plans\/([^/]+)\/(.+)$/);
     if (m === "GET" && planMatch) return handlePlanPage(req, res, planMatch[1] as string, planMatch[2] as string);

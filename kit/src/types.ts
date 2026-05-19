@@ -1,6 +1,6 @@
 import type { ComponentChildren, JSX } from "preact";
 
-export type PlanStatus = "proposed" | "approved" | "implemented" | "abandoned";
+export type PlanStatus = "designing" | "ready" | "implemented" | "rejected";
 
 export interface PlanProps {
   title: string;

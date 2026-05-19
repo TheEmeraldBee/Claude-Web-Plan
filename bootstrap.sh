@@ -3,8 +3,8 @@
 # Usage:  curl -fsSL https://raw.githubusercontent.com/TheEmeraldBee/Claude-Web-Plan/main/bootstrap.sh | bash
 #
 # Clones the repo to ~/.local/share/web-planner (or $WEB_PLANNER_HOME) and runs
-# the interactive installer. Idempotent: re-running fetches the latest main
-# and re-prompts.
+# the interactive installer. Re-running deletes any existing checkout and
+# re-clones from scratch so local edits never poison the install.
 
 set -euo pipefail
 
@@ -26,16 +26,13 @@ echo "repo:    ${REPO} (${BRANCH})"
 echo "install: ${INSTALL_ROOT}"
 echo
 
-if [ -d "${INSTALL_ROOT}/.git" ]; then
-  ok "existing checkout found — fetching latest"
-  git -C "${INSTALL_ROOT}" fetch --quiet origin "${BRANCH}"
-  git -C "${INSTALL_ROOT}" checkout --quiet "${BRANCH}"
-  git -C "${INSTALL_ROOT}" reset --hard --quiet "origin/${BRANCH}"
-else
-  mkdir -p "$(dirname "${INSTALL_ROOT}")"
-  ok "cloning into ${INSTALL_ROOT}"
-  git clone --quiet --branch "${BRANCH}" "${REPO}" "${INSTALL_ROOT}"
+if [ -e "${INSTALL_ROOT}" ]; then
+  warn "removing existing checkout at ${INSTALL_ROOT}"
+  rm -rf "${INSTALL_ROOT}"
 fi
+mkdir -p "$(dirname "${INSTALL_ROOT}")"
+ok "cloning into ${INSTALL_ROOT}"
+git clone --quiet --branch "${BRANCH}" "${REPO}" "${INSTALL_ROOT}"
 
 cd "${INSTALL_ROOT}"
 bold "running installer"

@@ -1,64 +1,130 @@
-// Vanilla JS viewer chrome — popover comments, chat box, state pill, send-feedback.
+// Vanilla JS viewer chrome — popover comments, unified bottom bar (help/status/chat/feedback/accept).
 // No build step. Loaded on every page from /ui/app.js.
 
 (function () {
   const PLAN = /** @type {{id:string, project:string, status:string, notes:Record<string,string>}|undefined} */ (window.__PLAN__);
-  const CARD = /** @type {{id:string, boardId:string, project:string, title:string, status:string, statuses:string[], notes:Record<string,string>}|undefined} */ (window.__CARD__);
 
-  // ---------- State pill ----------
-  function mountStatePill() {
-    const chrome = document.createElement("div");
-    chrome.className = "chrome";
-    chrome.innerHTML = `
-      <button type="button" class="state-pill" aria-expanded="true" title="toggle message box">
+  // ---------- Bottom bar (help · status · chat · feedback · accept) ----------
+  function mountBottomBar() {
+    const bar = document.createElement("div");
+    bar.className = "bottom-bar";
+    bar.innerHTML = `
+      <button type="button" class="bb-help" title="Help" aria-label="Help">?</button>
+      <div class="bb-status" title="Planner state">
         <span class="state-dot state-dot-idle"></span><span class="state-name">connecting…</span>
-        <span class="state-pill-caret" aria-hidden="true">▾</span>
-      </button>
-      <div class="chat-box">
-        <textarea placeholder="Message the planner…"></textarea>
-        <div class="row">
-          <span class="state-name" style="font-size:.78rem;color:var(--subtext0);">↵ send &nbsp; Shift+↵ newline &nbsp; / focus</span>
-          <button type="button">Send</button>
-        </div>
-        <div class="chat-hint" hidden></div>
       </div>
+      <textarea class="bb-chat" rows="1" placeholder="Message the planner…  ( / to focus, ↵ to send, Shift+↵ newline)"></textarea>
+      <button type="button" class="bb-send" title="Send message (↵)">Send</button>
+      <button type="button" class="bb-feedback" hidden>Send feedback</button>
+      <button type="button" class="bb-accept" hidden>Accept</button>
+      <span class="bb-hint" hidden></span>
     `;
-    document.body.appendChild(chrome);
-    return chrome;
+    document.body.appendChild(bar);
+    return bar;
   }
-  const chrome = mountStatePill();
-  const pillBtn = chrome.querySelector(".state-pill");
-  const pillDot = chrome.querySelector(".state-pill .state-dot");
-  const pillName = chrome.querySelector(".state-pill .state-name");
-  const chatArea = chrome.querySelector(".chat-box textarea");
-  const chatBtn = chrome.querySelector(".chat-box button");
-  const chatHint = chrome.querySelector(".chat-box .chat-hint");
+  const bar = mountBottomBar();
+  const pillDot = bar.querySelector(".state-dot");
+  const pillName = bar.querySelector(".state-name");
+  const chatArea = bar.querySelector(".bb-chat");
+  const chatBtn = bar.querySelector(".bb-send");
+  const helpBtn = bar.querySelector(".bb-help");
+  const fbBtn = bar.querySelector(".bb-feedback");
+  const acceptBtn = bar.querySelector(".bb-accept");
+  const hintEl = bar.querySelector(".bb-hint");
 
-  function showChatHint(text) {
-    if (!chatHint) return;
-    chatHint.textContent = text;
-    chatHint.hidden = false;
-    setTimeout(() => { chatHint.hidden = true; }, 4000);
+  function showHint(text) {
+    if (!hintEl) return;
+    hintEl.textContent = text;
+    hintEl.hidden = false;
+    clearTimeout(showHint._t);
+    showHint._t = setTimeout(() => { hintEl.hidden = true; }, 4000);
   }
+  function showChatHint(text) { showHint(text); }
 
-  function setCollapsed(collapsed) {
-    chrome.classList.toggle("collapsed", collapsed);
-    pillBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  // Bottom bar feedback/accept slots. Pages call __wpBar.setFeedback / setAccept
+  // to configure the slot for the current view. Pass null to hide.
+  // Declared up here so callers in the PLAN/CARD blocks below don't hit TDZ.
+  let _fbPayload = null;
+  let _acceptPayload = null;
+  function setFeedback(payload) {
+    _fbPayload = payload;
+    fbBtn.hidden = !payload;
   }
-  setCollapsed(true);
-  pillBtn.addEventListener("click", () => { setCollapsed(false); chatArea.focus(); });
-  chatArea.addEventListener("blur", () => { setTimeout(() => setCollapsed(true), 120); });
+  function setAccept(payload) {
+    _acceptPayload = payload;
+    acceptBtn.hidden = !payload;
+  }
+  fbBtn.addEventListener("click", async () => {
+    if (!_fbPayload) return;
+    if (_busy) { showHint("planner is not waiting for input"); return; }
+    fbBtn.disabled = true;
+    try {
+      const r = await fetch("/api/feedback", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify(_fbPayload),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) showHint(body.error === "no_comments" ? "add a comment first" : "send failed: " + (body.error || r.status));
+      else if (body.queued) showHint("queued — planner is busy; will deliver next");
+      else showHint("sent");
+    } finally { fbBtn.disabled = false; }
+  });
+  acceptBtn.addEventListener("click", async () => {
+    if (!_acceptPayload) return;
+    if (_busy) { showHint("planner is not waiting for input"); return; }
+    if (!confirm("Start implementation now? The planner will begin editing files.")) return;
+    acceptBtn.disabled = true;
+    try {
+      const r = await fetch("/api/start-implementation", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify(_acceptPayload),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) showHint("start failed: " + (body.error || r.status));
+      else if (body.queued) showHint("approved + queued — planner will start when free");
+      else showHint("approved + sent");
+    } finally { acceptBtn.disabled = false; }
+  });
+  window.__wpBar = { setFeedback, setAccept, showHint, isBusy: () => _busy };
+
+  helpBtn.addEventListener("click", toggleHelpPanel);
+
+  // Auto-grow chat textarea up to ~5 lines.
+  function autoSizeChat() {
+    chatArea.style.height = "auto";
+    chatArea.style.height = Math.min(chatArea.scrollHeight, 120) + "px";
+  }
+  chatArea.addEventListener("input", autoSizeChat);
+  autoSizeChat();
 
   let _activeTimer = null;
   let _activeStart = 0;
+
+  // Planner accepts input only when its state is exactly "waiting" (i.e.
+  // blocked on wait_for_message). Anything else — including "idle" — means
+  // there is no live agent loop listening, so a send would either be queued
+  // indefinitely or dropped. We expose this as a body class for CSS and as
+  // window.__wpBar.isBusy() for JS click handlers.
+  const READY_STATES = ["waiting"];
+  // "active" controls the working banner + ticking timer; idle/waiting/asking
+  // are all non-active, but only `waiting` is ready to accept input.
+  const NON_ACTIVE_STATES = ["idle", "waiting"];
+  let _busy = true;
+  function setBusy(busy) {
+    _busy = busy;
+    document.body.classList.toggle("wp-busy", busy);
+    const title = busy ? "Planner is not waiting for input right now" : "";
+    [chatBtn, fbBtn, acceptBtn].forEach((el) => { if (el) el.title = title; });
+  }
+  setBusy(true); // start busy; flips to ready on first "waiting" state SSE
 
   function setStateUi(value) {
     const kind = (value && value.kind) || "idle";
     pillDot.className = "state-dot state-dot-" + kind;
     pillDot.style.background = (value && value.color) ? value.color : "";
     if (_activeTimer) { clearInterval(_activeTimer); _activeTimer = null; }
-    const IDLE_STATES = ["idle", "waiting"];
-    if (IDLE_STATES.includes(kind)) {
+    setBusy(!READY_STATES.includes(kind));
+    if (NON_ACTIVE_STATES.includes(kind)) {
       pillName.textContent = kind;
       document.querySelector(".planner-active-banner")?.remove();
     } else {
@@ -86,6 +152,9 @@
     try { msg = JSON.parse(ev.data); } catch { return; }
     window.dispatchEvent(new CustomEvent("wp:sse", { detail: msg }));
     if (msg.type === "state") setStateUi(msg.value);
+    if (msg.type === "backlog:cleared" && msg.dropped > 0) {
+      showHint(`dropped ${msg.dropped} stale message${msg.dropped === 1 ? "" : "s"} — planner only saw the latest`);
+    }
     if (msg.type === "ask_user:open") openAskModal(msg.id, msg.payload);
     if (msg.type === "comment:set" && PLAN && msg.planId === PLAN.id) reflectComment(msg.blockId);
     if (msg.type === "comment:cleared" && PLAN && msg.planId === PLAN.id) clearCommentUi(msg.blockId);
@@ -108,12 +177,13 @@
       }
     }
   };
-  es.onerror = () => { pillName.textContent = "disconnected"; };
+  es.onerror = () => { pillName.textContent = "disconnected"; setBusy(true); };
 
   // ---------- Chat ----------
   async function sendChat() {
     const text = chatArea.value.trim();
     if (!text) return;
+    if (_busy) { showChatHint("planner is not waiting for input"); return; }
     chatBtn.disabled = true;
     try {
       const r = await fetch("/api/message", {
@@ -124,6 +194,7 @@
       const data = await r.json().catch(() => ({}));
       if (r.ok) {
         chatArea.value = "";
+        autoSizeChat();
         if (data.queued) showChatHint("Queued — position " + (data.position || "?"));
       } else {
         alert("send failed: " + (data.error || r.status));
@@ -168,7 +239,7 @@
   // ---------- Tab panel comments ----------
   // Tab-panel comment keys use the format: "{blockId}~{tabId}" e.g. "b-phases~tab-1"
   function wireTabPanelCommentBtns() {
-    if (!PLAN || PLAN.status === "implemented") return;
+    if (!PLAN) return;
     document.querySelectorAll(".plan-tabs").forEach((tabs) => {
       const block = tabs.closest("[data-block-id]");
       if (!block) return;
@@ -283,13 +354,10 @@
   function reflectStatus(status) {
     if (!PLAN) return;
     PLAN.status = status;
-    const badge = document.querySelector(".plan .plan-header .badge.status-proposed, .plan .plan-header .badge.status-approved, .plan .plan-header .badge.status-implemented, .plan .plan-header .badge.status-abandoned");
+    const badge = document.querySelector(".plan .plan-header .badge");
     if (badge) {
-      badge.className = "badge status-" + status;
+      badge.className = "badge status status-" + status;
       badge.textContent = status;
-    }
-    if (status === "implemented") {
-      document.querySelectorAll(".send-feedback-bar, .start-impl-bar").forEach((b) => b.remove());
     }
   }
 
@@ -392,39 +460,12 @@
       }
     });
 
-    mountFeedbackBar();
+    setFeedback({ project: PLAN.project, planId: PLAN.id });
+    setAccept({ project: PLAN.project, planId: PLAN.id });
     mountDeleteButton();
     mountBackButton();
-    if (PLAN.status !== "implemented") mountAiBlockBtn();
   }
-
-  if (CARD) {
-    const cardNotes = Object.assign({}, CARD.notes || {});
-    Object.keys(cardNotes).forEach(reflectCardComment);
-
-    document.addEventListener("click", (ev) => {
-      const target = ev.target;
-      if (!(target instanceof HTMLElement)) return;
-      const btn = target.closest(".comment-btn");
-      if (btn) {
-        const blockId = btn.getAttribute("data-comment-for");
-        if (blockId) openCardCommentPopover(blockId);
-      }
-    });
-
-    mountCardAiBlockBtn();
-    mountCardDeleteButton();
-    mountCardInlineTitleEdit();
-    mountCardStatusPill();
-    mountCardFeedbackBar();
-
-    window.addEventListener("wp:sse", (ev) => {
-      const msg = ev.detail;
-      if (msg.type === "card:updated" && msg.project === CARD.project && msg.boardId === CARD.boardId && msg.cardId === CARD.id) {
-        location.reload();
-      }
-    });
-  }
+  mountAiBlockBtn();
 
   // ---------- Copy buttons ----------
   document.addEventListener("click", (ev) => {
@@ -444,32 +485,56 @@
   document.addEventListener("keydown", (ev) => {
     if (ev.key === "/" && !(ev.target instanceof HTMLInputElement) && !(ev.target instanceof HTMLTextAreaElement)) {
       ev.preventDefault();
-      setCollapsed(false);
       chatArea.focus();
     }
   });
 
   function mountAiBlockBtn() {
-    const bar = document.querySelector(".send-feedback-bar");
-    if (!bar) return;
+    if (document.querySelector(".ai-block-btn-wrap")) return;
+    const host =
+      document.querySelector(".plan-blocks") ||
+      document.querySelector(".project-page") ||
+      document.querySelector(".dashboard") ||
+      document.querySelector(".plan") ||
+      document.querySelector("main") ||
+      document.body;
+    const wrap = document.createElement("div");
+    wrap.className = "ai-block-btn-wrap";
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "ai-block-btn";
     btn.textContent = "+ AI block";
     btn.addEventListener("click", openAiBlockPopover);
-    bar.before(btn);
+    wrap.appendChild(btn);
+    host.appendChild(wrap);
+  }
+
+  function currentAiBlockContext() {
+    const PAGE = window.__PAGE__;
+    const TAB = window.__TAB__;
+    if (PLAN) return { kind: "plan", project: PLAN.project, planId: PLAN.id };
+    if (TAB) return { kind: "tab", project: TAB.project, tabId: TAB.tabId };
+    if (PAGE && PAGE.project) return { kind: "project", project: PAGE.project };
+    return { kind: "dashboard" };
   }
 
   function openAiBlockPopover() {
+    if (_busy) { showHint("planner is not waiting for input"); return; }
     closePopover();
+    const ctx = currentAiBlockContext();
     const pop = document.createElement("div");
     pop.className = "popover";
     pop.style.position = "fixed";
     pop.style.bottom = "80px";
     pop.style.right = "16px";
     pop.style.width = "380px";
+    const heading =
+      ctx.kind === "plan"    ? "Add AI-generated block to this plan" :
+      ctx.kind === "tab"     ? "Add AI-generated block to this tab" :
+      ctx.kind === "project" ? "Ask the planner to add something" :
+                               "Ask the planner";
     pop.innerHTML = `
-      <h6>Add AI-generated block</h6>
+      <h6>${heading}</h6>
       <textarea rows="3" placeholder="Describe the block you want…"></textarea>
       <div class="row">
         <button type="button" class="cancel">Cancel</button>
@@ -486,12 +551,25 @@
       saveBtn.disabled = true;
       saveBtn.textContent = "sending…";
       try {
-        await fetch("/api/generate-block", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ planId: PLAN.id, project: PLAN.project, prompt }),
-        });
+        if (ctx.kind === "plan") {
+          await fetch("/api/generate-block", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ planId: ctx.planId, project: ctx.project, prompt }),
+          });
+        } else {
+          const tag =
+            ctx.kind === "tab"     ? `[ai-block project=${ctx.project} tabId=${ctx.tabId}]` :
+            ctx.kind === "project" ? `[ai-block project=${ctx.project}]` :
+                                     `[ai-block]`;
+          await fetch("/api/message", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ text: `${tag}\n${prompt}`, source: "browser" }),
+          });
+        }
         closePopover();
+        showHint("sent to planner");
       } catch (e) {
         alert("send failed: " + e);
       } finally {
@@ -584,7 +662,6 @@
     const delBtn = pop.querySelector(".delete");
     if (delBtn) {
       delBtn.addEventListener("click", async () => {
-        if (PLAN.status === "implemented") { alert("plan is frozen — comments are read-only"); return; }
         delBtn.disabled = true;
         const r = await fetch("/api/comment", {
           method: "POST",
@@ -604,7 +681,6 @@
     pop.querySelector(".save").addEventListener("click", async () => {
       const text = ta.value.trim();
       if (!text) { closePopover(); return; }
-      if (PLAN.status === "implemented") { alert("plan is frozen — comments are read-only"); return; }
       const r = await fetch("/api/comment", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -634,68 +710,6 @@
   }
   function escapeHtml(s) {
     return s.replace(/[&<>"']/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", "\"":"&quot;", "'":"&#39;" }[c]));
-  }
-
-  function mountFeedbackBar() {
-    if (PLAN.status === "implemented") return;
-    const bar = document.createElement("div");
-    bar.className = "send-feedback-bar";
-    bar.innerHTML = `
-      <button type="button" class="send-feedback">Send feedback to planner</button>
-      <button type="button" class="start-impl">Start Implementation</button>
-      <span class="bar-hint" hidden></span>
-    `;
-    document.querySelector(".plan").appendChild(bar);
-    const fbBtn = bar.querySelector(".send-feedback");
-    const implBtn = bar.querySelector(".start-impl");
-    const hint = bar.querySelector(".bar-hint");
-    function showHint(text) {
-      hint.textContent = text;
-      hint.hidden = false;
-      setTimeout(() => { hint.hidden = true; }, 4000);
-    }
-    fbBtn.addEventListener("click", async () => {
-      fbBtn.disabled = true;
-      try {
-        const r = await fetch("/api/feedback", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ project: PLAN.project, planId: PLAN.id }),
-        });
-        const body = await r.json().catch(() => ({}));
-        if (!r.ok) {
-          alert(body.error === "no_comments" ? "add a comment first" :
-                "send failed: " + (body.error || r.status));
-        } else if (body.queued) {
-          showHint("queued — planner is busy; will deliver next");
-        } else {
-          showHint("sent");
-        }
-      } finally {
-        fbBtn.disabled = false;
-      }
-    });
-    implBtn.addEventListener("click", async () => {
-      if (!confirm("Start implementation now? The planner will begin editing files.")) return;
-      implBtn.disabled = true;
-      try {
-        const r = await fetch("/api/start-implementation", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ project: PLAN.project, planId: PLAN.id }),
-        });
-        const body = await r.json().catch(() => ({}));
-        if (!r.ok) {
-          alert("start failed: " + (body.error || r.status));
-        } else if (body.queued) {
-          showHint("approved + queued — planner will start when free");
-        } else {
-          showHint("approved + sent");
-        }
-      } finally {
-        implBtn.disabled = false;
-      }
-    });
   }
 
   // ---------- Ask modal ----------
@@ -844,211 +858,7 @@
   }
   window.__showToast = showToast;
 
-  // ---------- Card page functions ----------
-  function reflectCardComment(blockId) {
-    const block = document.querySelector('[data-block-id="' + cssEscape(blockId) + '"]');
-    if (!block) return;
-    const btn = block.querySelector('.comment-btn[data-comment-for="' + cssEscape(blockId) + '"]');
-    if (btn) btn.textContent = "edit comment";
-    block.setAttribute("data-has-comment", "true");
-  }
-
-  function openCardCommentPopover(blockId) {
-    closePopover();
-    const block = document.querySelector('[data-block-id="' + cssEscape(blockId) + '"]');
-    if (!block) return;
-    const cardNotes = CARD.notes || {};
-    const existing = cardNotes[blockId] || "";
-    const pop = document.createElement("div");
-    pop.className = "popover";
-    pop.setAttribute("data-comment-block", blockId);
-    pop.innerHTML = `
-      <h6>comment on ${escapeHtml(blockId)}</h6>
-      ${existing ? `<div class="existing">${escapeHtml(existing)}</div>` : ""}
-      <textarea rows="2" placeholder="${existing ? "overwrite the comment…" : "add a comment…"}"></textarea>
-      <div class="row">
-        <button type="button" class="cancel">cancel</button>
-        ${existing ? `<button type="button" class="delete">delete</button>` : ""}
-        <button type="button" class="save">save</button>
-      </div>`;
-    document.body.appendChild(pop);
-    const rect = block.getBoundingClientRect();
-    pop.style.cssText = `position:fixed;top:${Math.min(rect.bottom + 8, window.innerHeight - 200)}px;left:${Math.min(rect.left, window.innerWidth - 296)}px;max-width:calc(100vw - 32px);`;
-    const ta = pop.querySelector("textarea");
-    ta && ta.focus();
-    pop.querySelector(".cancel").addEventListener("click", closePopover);
-    const delBtn = pop.querySelector(".delete");
-    if (delBtn) {
-      delBtn.addEventListener("click", async () => {
-        delBtn.disabled = true;
-        const r = await fetch("/api/card-comment", {
-          method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ project: CARD.project, boardId: CARD.boardId, cardId: CARD.id, blockId, text: "" }),
-        });
-        if (r.ok) { delete (CARD.notes || {})[blockId]; block.removeAttribute("data-has-comment"); const btn = block.querySelector(".comment-btn"); if (btn) btn.textContent = "+ comment"; closePopover(); }
-        else { const e = await r.json().catch(() => ({})); alert("delete failed: " + (e.error || r.status)); delBtn.disabled = false; }
-      });
-    }
-    pop.querySelector(".save").addEventListener("click", async () => {
-      const text = ta ? ta.value.trim() : "";
-      if (!text) { closePopover(); return; }
-      const saveBtn = pop.querySelector(".save");
-      saveBtn.disabled = true;
-      const r = await fetch("/api/card-comment", {
-        method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ project: CARD.project, boardId: CARD.boardId, cardId: CARD.id, blockId, text }),
-      });
-      if (r.ok) { CARD.notes = CARD.notes || {}; CARD.notes[blockId] = text; reflectCardComment(blockId); closePopover(); }
-      else { const e = await r.json().catch(() => ({})); alert("save failed: " + (e.error || r.status)); saveBtn.disabled = false; }
-    });
-    setTimeout(() => document.addEventListener("click", outsideClick, true), 0);
-  }
-
-  function mountCardAiBlockBtn() {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "ai-block-btn";
-    btn.textContent = "+ AI block";
-    btn.style.cssText = "position:fixed;bottom:80px;right:56px;";
-    btn.addEventListener("click", () => {
-      closePopover();
-      const pop = document.createElement("div");
-      pop.className = "popover";
-      pop.style.cssText = "position:fixed;bottom:130px;right:16px;width:360px;max-width:calc(100vw - 32px);";
-      pop.innerHTML = `<h6>Add AI-generated block</h6>
-        <textarea rows="3" placeholder="Describe what you want…"></textarea>
-        <div class="row"><button type="button" class="cancel">Cancel</button><button type="button" class="save">Generate</button></div>`;
-      document.body.appendChild(pop);
-      const ta = pop.querySelector("textarea");
-      ta && ta.focus();
-      pop.querySelector(".cancel").addEventListener("click", closePopover);
-      pop.querySelector(".save").addEventListener("click", async () => {
-        const prompt = ta ? ta.value.trim() : "";
-        if (!prompt) return;
-        const saveBtn = pop.querySelector(".save");
-        saveBtn.disabled = true; saveBtn.textContent = "sending…";
-        await fetch("/api/card-generate-block", {
-          method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ project: CARD.project, boardId: CARD.boardId, cardId: CARD.id, prompt }),
-        });
-        closePopover();
-      });
-      setTimeout(() => document.addEventListener("click", outsideClick, true), 0);
-    });
-    document.body.appendChild(btn);
-  }
-
-  function mountCardDeleteButton() {
-    const header = document.querySelector(".card-page-header .plan-meta");
-    if (!header) return;
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "plan-delete-btn";
-    btn.textContent = "Delete card";
-    btn.addEventListener("click", async () => {
-      if (!confirm("Delete this card? This is permanent.")) return;
-      btn.disabled = true;
-      const r = await fetch("/api/card-delete", {
-        method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ project: CARD.project, boardId: CARD.boardId, cardId: CARD.id }),
-      });
-      if (r.ok) location.href = "/projects/" + encodeURIComponent(CARD.project) + "?tab=" + encodeURIComponent(CARD.boardId);
-      else { const e = await r.json().catch(() => ({})); alert("delete failed: " + (e.error || r.status)); btn.disabled = false; }
-    });
-    header.appendChild(btn);
-  }
-
-  function mountCardInlineTitleEdit() {
-    const h1 = document.querySelector(".card-page-title");
-    if (!h1) return;
-    let lastTitle = h1.getAttribute("data-card-title") || h1.textContent || "";
-    const save = async () => {
-      const newTitle = (h1.textContent || "").trim();
-      if (!newTitle || newTitle === lastTitle) { h1.textContent = lastTitle; return; }
-      const r = await fetch("/api/board/update-card", {
-        method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ project: CARD.project, boardId: CARD.boardId, cardId: CARD.id, title: newTitle }),
-      });
-      if (r.ok) { lastTitle = newTitle; CARD.title = newTitle; document.title = newTitle + " — " + document.title.split(" — ").slice(1).join(" — "); }
-      else { h1.textContent = lastTitle; const e = await r.json().catch(() => ({})); alert("rename failed: " + (e.error || r.status)); }
-    };
-    h1.addEventListener("blur", save);
-    h1.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); h1.blur(); } if (ev.key === "Escape") { h1.textContent = lastTitle; h1.blur(); } });
-  }
-
-  function mountCardStatusPill() {
-    const pill = document.querySelector(".card-status-pill");
-    if (!pill) return;
-    pill.style.cursor = "pointer";
-    pill.title = "Click to move to another column";
-    pill.addEventListener("click", () => {
-      closePopover();
-      const otherStatuses = (CARD.statuses || []).filter((s) => s !== CARD.status);
-      if (otherStatuses.length === 0) return;
-      const pop = document.createElement("div");
-      pop.className = "popover";
-      const rect = pill.getBoundingClientRect();
-      pop.style.cssText = `position:fixed;top:${Math.min(rect.bottom + 6, window.innerHeight - 150)}px;left:${Math.min(rect.left, window.innerWidth - 176)}px;min-width:160px;max-width:calc(100vw - 32px);`;
-      pop.innerHTML = `<h6>Move to</h6>` + otherStatuses.map((s) =>
-        `<button type="button" class="status-move-btn" data-status="${escapeHtml(s)}" style="display:block;width:100%;text-align:left;margin-bottom:4px;">${escapeHtml(s)}</button>`
-      ).join("");
-      document.body.appendChild(pop);
-      pop.querySelectorAll(".status-move-btn").forEach((btn) => {
-        btn.addEventListener("click", async () => {
-          const newStatus = btn.getAttribute("data-status");
-          closePopover();
-          const r = await fetch("/api/board/update-card", {
-            method: "POST", headers: { "content-type": "application/json" },
-            body: JSON.stringify({ project: CARD.project, boardId: CARD.boardId, cardId: CARD.id, status: newStatus }),
-          });
-          if (r.ok) { pill.textContent = newStatus; CARD.status = newStatus; }
-          else { const e = await r.json().catch(() => ({})); alert("move failed: " + (e.error || r.status)); }
-        });
-      });
-      setTimeout(() => document.addEventListener("click", outsideClick, true), 0);
-    });
-  }
-
-  function mountCardFeedbackBar() {
-    const bar = document.createElement("div");
-    bar.className = "send-feedback-bar";
-    bar.innerHTML = `<button type="button" class="send-feedback">Send feedback to planner</button><span class="bar-hint" hidden></span>`;
-    const target = document.querySelector(".plan-blocks") || document.querySelector(".plan");
-    if (target) target.appendChild(bar);
-    const fbBtn = bar.querySelector(".send-feedback");
-    const hint = bar.querySelector(".bar-hint");
-    function showHint(text) { hint.textContent = text; hint.hidden = false; setTimeout(() => { hint.hidden = true; }, 4000); }
-    fbBtn.addEventListener("click", async () => {
-      fbBtn.disabled = true;
-      try {
-        const r = await fetch("/api/card-feedback", {
-          method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ project: CARD.project, boardId: CARD.boardId, cardId: CARD.id }),
-        });
-        const body = await r.json().catch(() => ({}));
-        if (!r.ok) {
-          alert(body.error === "no_comments" ? "add a comment first" : "send failed: " + (body.error || r.status));
-        } else if (body.queued) {
-          showHint("queued — planner is busy; will deliver next");
-        } else {
-          showHint("sent");
-        }
-      } finally {
-        fbBtn.disabled = false;
-      }
-    });
-  }
-
-  // ---------- Help button ----------
-  function mountHelpBtn() {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "help-btn";
-    btn.textContent = "?";
-    btn.title = "Help";
-    btn.addEventListener("click", toggleHelpPanel);
-    document.body.appendChild(btn);
-  }
+  // ---------- Help panel (anchored above bar's ? button) ----------
   function toggleHelpPanel() {
     const existing = document.querySelector(".help-panel");
     if (existing) { existing.remove(); return; }
@@ -1064,7 +874,7 @@
         <dt>Send feedback</dt>
         <dd>After commenting, click <strong>Send feedback to planner</strong> to wake the agent.</dd>
         <dt>Chat with planner</dt>
-        <dd>Type in the chat box (lower right) and press <strong>&#x23CE;</strong> to send.</dd>
+        <dd>Type in the bottom-bar input and press <strong>&#x23CE;</strong> to send.</dd>
         <dt>Keyboard shortcuts</dt>
         <dd><code>/</code> &mdash; focus chat &nbsp; <code>&#x23CE;</code> &mdash; send &nbsp; <code>Shift+&#x23CE;</code> &mdash; new line</dd>
         <dd><code>&#x2190;</code> / <code>&#x2192;</code> &mdash; prev/next slide &nbsp; <code>F</code> &mdash; fullscreen</dd>
@@ -1074,5 +884,4 @@
     document.body.appendChild(panel);
     panel.querySelector(".help-close").addEventListener("click", () => panel.remove());
   }
-  mountHelpBtn();
 })();

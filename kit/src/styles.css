@@ -100,10 +100,10 @@ pre code { background: transparent; color: inherit; padding: 0; }
   border: 1px solid var(--surface1);
   text-transform: lowercase;
 }
-.badge.status-proposed     { color: var(--yellow); border-color: rgba(249,226,175,0.3); }
-.badge.status-approved     { color: var(--blue);   border-color: rgba(137,180,250,0.3); }
+.badge.status-designing    { color: var(--yellow); border-color: rgba(249,226,175,0.3); }
+.badge.status-ready        { color: var(--blue);   border-color: rgba(137,180,250,0.3); }
 .badge.status-implemented  { color: var(--green);  border-color: rgba(166,227,161,0.3); }
-.badge.status-abandoned    { color: var(--red);    border-color: rgba(243,139,168,0.3); }
+.badge.status-rejected     { color: var(--red);    border-color: rgba(243,139,168,0.3); }
 
 /* Blocks */
 .block {
@@ -149,7 +149,6 @@ pre code { background: transparent; color: inherit; padding: 0; }
   padding-left: 14px;
   margin-left: -17px;
 }
-.plan[data-status="implemented"] .block-toolbar { display: none; }
 
 /* Callout */
 .callout {
@@ -591,122 +590,116 @@ pre.mermaid svg { max-width: 100%; height: auto; }
   color: var(--text);
 }
 
-/* Chat + state pill */
-.chrome {
+/* Unified bottom bar: help · status · chat · feedback · accept */
+body { padding-bottom: 64px; }
+.bottom-bar {
   position: fixed;
-  bottom: 16px;
-  right: 16px;
+  left: 0; right: 0; bottom: 0;
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
+  align-items: center;
   gap: 10px;
+  padding: 8px 14px;
+  background: var(--mantle);
+  border-top: 1px solid var(--surface1);
   z-index: 40;
+  box-shadow: 0 -4px 18px rgba(0,0,0,0.35);
 }
-.state-pill {
+.bottom-bar .bb-help {
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  background: var(--surface0);
+  border: 1px solid var(--surface1);
+  color: var(--subtext0);
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  background: var(--mantle);
+  justify-content: center;
+  flex: 0 0 auto;
+}
+.bottom-bar .bb-help:hover { background: var(--surface1); color: var(--text); }
+.bottom-bar .bb-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--base);
   border: 1px solid var(--surface1);
   border-radius: 999px;
-  padding: 6px 14px;
-  font-size: 0.82rem;
+  padding: 4px 12px;
+  font-size: 0.8rem;
   font-family: ui-monospace, monospace;
   color: var(--text);
-  cursor: pointer;
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
-.state-pill:hover { border-color: var(--mauve); }
-.state-pill .state-dot { box-shadow: 0 0 0 2px var(--mantle); }
-.state-pill-caret {
-  font-size: 0.72rem;
-  color: var(--subtext0);
-  transition: transform 0.15s ease;
-}
-.chrome.collapsed .state-pill-caret { transform: rotate(180deg); }
-.chrome.collapsed .chat-box { display: none; }
-.chat-box {
-  width: 360px;
-  background: var(--mantle);
-  border: 1px solid var(--surface1);
-  border-radius: 12px;
-  padding: 10px 12px;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.45);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.chat-box textarea {
-  width: 100%;
-  resize: vertical;
-  min-height: 56px;
+.bottom-bar .bb-status .state-dot { box-shadow: 0 0 0 2px var(--base); }
+.bottom-bar .bb-chat {
+  flex: 1 1 auto;
+  min-width: 0;
+  resize: none;
   background: var(--crust);
   color: var(--text);
   border: 1px solid var(--surface0);
   border-radius: 8px;
-  padding: 8px 10px;
+  padding: 7px 10px;
   font-family: inherit;
   font-size: 0.9rem;
+  line-height: 1.35;
+  height: 36px;
+  max-height: 120px;
 }
-.chat-box .row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-.chat-box button {
-  background: var(--mauve);
-  color: var(--crust);
-  border: none;
+.bottom-bar .bb-chat:focus { outline: none; border-color: var(--mauve); }
+.bottom-bar button.bb-send,
+.bottom-bar button.bb-feedback,
+.bottom-bar button.bb-accept {
+  border: 1px solid transparent;
   border-radius: 8px;
-  padding: 6px 14px;
+  padding: 7px 14px;
   font-weight: 700;
-  font-size: 0.84rem;
+  font-size: 0.85rem;
+  font-family: inherit;
   cursor: pointer;
+  flex: 0 0 auto;
 }
-.chat-box button:disabled {
+.bottom-bar button.bb-send     { background: var(--mauve);  color: var(--crust); }
+.bottom-bar button.bb-feedback { background: var(--yellow); color: var(--crust); }
+.bottom-bar button.bb-accept   { background: var(--green);  color: var(--crust); }
+.bottom-bar button:disabled {
   background: var(--surface1);
   color: var(--subtext0);
   cursor: not-allowed;
 }
-.chat-hint {
+.bottom-bar .bb-hint {
   font-size: 0.78rem;
   color: var(--subtext0);
-  padding: 2px 0;
-  text-align: right;
+  margin-left: 4px;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+@media (max-width: 720px) {
+  .bottom-bar { flex-wrap: wrap; }
+  .bottom-bar .bb-chat { order: 10; flex-basis: 100%; }
+  .bottom-bar .bb-hint { order: 11; flex-basis: 100%; text-align: right; }
 }
 
-.send-feedback-bar {
-  position: sticky;
-  bottom: 0;
-  background: linear-gradient(0deg, var(--base) 60%, transparent);
-  padding: 24px 0 12px;
-  text-align: center;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-.send-feedback-bar button {
-  background: var(--yellow);
-  color: var(--crust);
-  border: none;
-  border-radius: 999px;
-  padding: 10px 22px;
-  font-weight: 700;
-  font-size: 0.92rem;
-  cursor: pointer;
-}
-.send-feedback-bar button.start-impl {
-  background: var(--green);
-}
-.send-feedback-bar button:disabled {
-  background: var(--surface1);
-  color: var(--subtext0);
+/* Planner-busy state: visually disable any control that triggers a new
+   planner turn. The handlers also short-circuit defensively (since CSS
+   pointer-events alone won't stop keyboard activation), but the styles
+   make the disabled affordance obvious. */
+body.wp-busy .bottom-bar button.bb-send,
+body.wp-busy .bottom-bar button.bb-feedback,
+body.wp-busy .bottom-bar button.bb-accept,
+body.wp-busy .ai-block-btn,
+body.wp-busy .new-plan-btn,
+body.wp-busy .new-tab-btn {
+  opacity: 0.45;
   cursor: not-allowed;
+  pointer-events: none;
+  filter: saturate(0.5);
 }
-.send-feedback-bar .bar-hint {
-  font-size: 0.82rem;
-  color: var(--subtext0);
+body.wp-busy .bottom-bar .bb-chat {
+  opacity: 0.7;
 }
 .popover .row button.delete {
   background: var(--red);
@@ -758,7 +751,7 @@ pre.mermaid svg { max-width: 100%; height: auto; }
 }
 .project-stats .dot { color: var(--overlay0); }
 .project-stats strong { color: var(--text); }
-.project-stats .status-proposed     { color: var(--yellow); }
+.project-stats .status-designing    { color: var(--yellow); }
 .project-stats .status-implemented  { color: var(--green); }
 .project-latest {
   margin: 8px 0 0;
@@ -1013,7 +1006,6 @@ a.plan-row .when { color: var(--subtext0); font-size: 0.84rem; font-family: ui-m
   margin-top: 10px;
 }
 .plan .plan-tab-panel .tab-panel-toolbar { display: flex; }
-.plan[data-status="implemented"] .plan-tab-panel .tab-panel-toolbar { display: none; }
 .tab-panel-toolbar button {
   background: var(--surface0);
   color: var(--subtext1);
@@ -1113,72 +1105,6 @@ a.plan-row .when { color: var(--subtext0); font-size: 0.84rem; font-family: ui-m
   .slide-progress-fill { transition: none; }
 }
 
-/* Card board */
-.card-board {
-  display: flex;
-  gap: 16px;
-  overflow-x: auto;
-  padding-bottom: 8px;
-  align-items: stretch;
-}
-.card-col {
-  flex: 0 0 260px;
-  background: var(--mantle);
-  border: 1px solid var(--surface0);
-  border-radius: 10px;
-  display: flex;
-  flex-direction: column;
-}
-.card-col-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--surface0);
-}
-.card-col-head h4 { margin: 0; font-size: 0.9rem; color: var(--text); font-weight: 600; }
-.card-col-body {
-  padding: 10px;
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-height: 60px;
-}
-.card-item {
-  background: var(--base);
-  border: 1px solid var(--surface0);
-  border-radius: 8px;
-  padding: 0;
-  transition: border-color 0.15s;
-}
-.card-item:hover { border-color: var(--mauve); }
-.card-item-title { font-weight: 500; color: var(--text); font-size: 0.92rem; }
-.card-item-body { color: var(--subtext0); font-size: 0.82rem; margin-top: 4px; line-height: 1.4; }
-.card-item-status {
-  display: inline-block;
-  font-size: 0.75rem;
-  color: var(--subtext0);
-  background: var(--surface0);
-  border-radius: 999px;
-  padding: 2px 8px;
-  margin-top: 6px;
-}
-.card-col-add {
-  margin: 0 10px 10px;
-  width: calc(100% - 20px);
-  background: transparent;
-  border: 1px dashed var(--surface1);
-  color: var(--subtext0);
-  border-radius: 8px;
-  padding: 8px;
-  font-size: 0.84rem;
-  cursor: pointer;
-  text-align: center;
-  font-family: inherit;
-}
-.card-col-add:hover { border-color: var(--mauve); color: var(--mauve); }
-
 /* Plan search */
 .plan-search {
   width: 100%;
@@ -1196,6 +1122,7 @@ a.plan-row .when { color: var(--subtext0); font-size: 0.84rem; font-family: ui-m
 .plan-search::placeholder { color: var(--subtext0); }
 
 /* AI-block button + New Plan button */
+.ai-block-btn-wrap { display: flex; justify-content: center; margin: 24px 0 8px; }
 .ai-block-btn, .new-plan-btn {
   background: var(--surface0);
   border: 1px dashed var(--surface1);
@@ -1209,50 +1136,6 @@ a.plan-row .when { color: var(--subtext0); font-size: 0.84rem; font-family: ui-m
 }
 .ai-block-btn:hover, .new-plan-btn:hover { border-color: var(--mauve); color: var(--mauve); }
 .new-plan-btn { margin-bottom: 12px; }
-
-/* Tab type toggle (new-tab modal) */
-.tab-type-toggle {
-  display: flex;
-  gap: 2px;
-  background: var(--surface0);
-  border-radius: 6px;
-  padding: 3px;
-  margin-bottom: 12px;
-}
-.tab-type-toggle button {
-  flex: 1;
-  background: transparent;
-  border: none;
-  border-radius: 4px;
-  padding: 5px 12px;
-  font-size: 0.85rem;
-  color: var(--subtext0);
-  cursor: pointer;
-  font-family: inherit;
-  transition: background 0.15s, color 0.15s;
-}
-.tab-type-toggle button.active { background: var(--mauve); color: var(--base); font-weight: 600; }
-
-/* Card board header */
-.card-board-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 12px;
-}
-.card-board-title { font-weight: 600; color: var(--text); }
-.card-board-edit-btn {
-  background: transparent;
-  border: 1px solid var(--surface1);
-  color: var(--subtext0);
-  border-radius: 6px;
-  padding: 4px 10px;
-  font-size: 0.82rem;
-  cursor: pointer;
-  font-family: inherit;
-  transition: border-color 0.15s, color 0.15s;
-}
-.card-board-edit-btn:hover { border-color: var(--mauve); color: var(--mauve); }
 
 /* ---- Active banner ---- */
 .planner-active-banner {
@@ -1290,23 +1173,9 @@ a.plan-row .when { color: var(--subtext0); font-size: 0.84rem; font-family: ui-m
 }
 .toast.toast-visible { opacity: 1; transform: none; }
 
-/* ---- Help button ---- */
-.help-btn {
-  position: fixed; bottom: 16px; left: 16px;
-  width: 32px; height: 32px;
-  background: var(--surface0);
-  border: 1px solid var(--surface1);
-  color: var(--subtext0);
-  border-radius: 50%;
-  font-size: 0.9rem; font-weight: 700;
-  cursor: pointer; z-index: 50;
-  display: flex; align-items: center; justify-content: center;
-}
-.help-btn:hover { background: var(--surface1); color: var(--text); }
-
-/* ---- Help panel ---- */
+/* ---- Help panel (anchored above bottom-bar ? button) ---- */
 .help-panel {
-  position: fixed; bottom: 56px; left: 16px;
+  position: fixed; bottom: 72px; left: 14px;
   width: 320px; max-height: 70vh; overflow-y: auto;
   background: var(--crust);
   border: 1px solid var(--surface1);
@@ -1361,55 +1230,3 @@ a.plan-row .when { color: var(--subtext0); font-size: 0.84rem; font-family: ui-m
   text-align: left;
 }
 
-/* ---- Card page ---- */
-.card-page-title[contenteditable] {
-  outline: none;
-  border-bottom: 2px solid transparent;
-  transition: border-color 0.15s;
-  cursor: text;
-  padding-bottom: 2px;
-}
-.card-page-title[contenteditable]:hover { border-color: var(--surface2); }
-.card-page-title[contenteditable]:focus { border-color: var(--mauve); }
-.card-page-meta { margin-top: 6px; display: flex; align-items: center; gap: 8px; }
-.card-status-pill {
-  display: inline-block;
-  background: var(--surface0);
-  border: 1px solid var(--surface1);
-  border-radius: 20px;
-  padding: 3px 12px;
-  font-size: 0.82rem;
-  color: var(--subtext0);
-  transition: border-color 0.15s, color 0.15s;
-}
-.card-status-pill:hover { border-color: var(--mauve); color: var(--mauve); }
-.status-move-btn {
-  background: var(--surface0); border: 1px solid var(--surface1); border-radius: 6px;
-  color: var(--text); padding: 6px 10px; cursor: pointer; font-family: inherit; font-size: 0.88rem;
-  transition: background 0.12s;
-}
-.status-move-btn:hover { background: var(--surface1); border-color: var(--mauve); }
-
-/* Suppress inner Plan component header on card pages — card shell provides its own */
-.card-page > .plan > .plan-header { display: none; }
-.card-page > .plan { padding-top: 0; }
-
-/* ---- Card board: card links and quick-move ---- */
-.card-item-link {
-  display: block; text-decoration: none; color: inherit;
-  padding: 10px 12px; cursor: pointer;
-}
-.card-item-link:hover .card-item-title { color: var(--mauve); }
-.card-item-footer {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 4px 12px 8px; gap: 6px;
-}
-.card-quick-move-wrap { display: flex; gap: 4px; flex-wrap: wrap; }
-.card-quick-move {
-  background: var(--surface0); border: 1px solid var(--surface1);
-  color: var(--subtext0); border-radius: 4px; padding: 2px 8px;
-  font-size: 0.75rem; cursor: pointer; font-family: inherit;
-  transition: background 0.12s, color 0.12s;
-}
-.card-quick-move:hover { background: var(--surface1); color: var(--text); }
-.card-quick-move:disabled { opacity: 0.4; cursor: not-allowed; }

@@ -61,6 +61,27 @@ class State {
     return this.backlog.shift();
   }
 
+  /**
+   * Drop every queued backlog entry. Called on entry to wait_for_message:
+   * anything queued during the previous turn reflects a context the agent
+   * has already left behind, so the planner should listen fresh for the
+   * next real message instead of replaying stale work.
+   *
+   * Broadcasts `backlog:cleared` (with the dropped count) so the browser
+   * can surface a hint that older messages were discarded.
+   */
+  clearBacklog(): number {
+    const dropped = this.backlog.length;
+    if (dropped === 0) return 0;
+    this.backlog = [];
+    this.broadcast({ type: "backlog:cleared", dropped });
+    return dropped;
+  }
+
+  peekBacklog(): BacklogEntry[] {
+    return this.backlog.slice();
+  }
+
   setActivity(next: Partial<ActivityState> & { kind: ActivityKind }) {
     this.activity = { since: Date.now(), ...next };
     this.broadcast({ type: "state", value: this.activity });
@@ -69,11 +90,7 @@ class State {
   addSubscriber(send: Subscriber["send"]): string {
     const id = randomUUID();
     this.subscribers.set(id, { id, send });
-    // Current state
     send({ type: "state", value: this.activity });
-    // Replay open ask_user so a fresh tab (or a reload after the original
-    // broadcast was missed) re-renders the modal. The agent is still blocked
-    // on the same pending Promise — answering on this client will resolve it.
     for (const [pendingId, p] of this.pending) {
       if (p.kind === "ask_user") {
         send({ type: "ask_user:open", id: pendingId, payload: { questions: p.questions } });
@@ -87,6 +104,14 @@ class State {
     for (const s of this.subscribers.values()) {
       try { s.send(data); } catch { /* drop dead subs silently */ }
     }
+  }
+
+  // Convenience: broadcast a server-confirmed ack for a given client request_id.
+  // The browser's submit() helper waits for either the HTTP response or this
+  // event (whichever resolves the matching id first) and tears down the watchdog.
+  ack(request_id: string | undefined, detail: Record<string, unknown> = {}) {
+    if (!request_id) return;
+    this.broadcast({ type: "ack", request_id, ...detail });
   }
 
   registerPending(p: Pending): string {

@@ -10,6 +10,7 @@ import { spawn } from "node:child_process";
 import { startHttp, config, storage } from "./http.js";
 import { state, type AskedQuestion } from "./state.js";
 import { THEMES } from "./themes.js";
+import { STATUSES } from "./storage.js";
 import {
   appendBlock,
   blockIdsIn,
@@ -60,7 +61,7 @@ function mergeKitImports(source: string, newNames: string[]): string {
   const re = /^(import\s*\{)([^}]+)(\}\s*from\s*["']@web-planner\/kit["'];?)$/m;
   const m = source.match(re);
   if (!m) return source;
-  const existing = m[2].split(",").map((s) => s.trim()).filter(Boolean);
+  const existing = m[2]!.split(",").map((s) => s.trim()).filter(Boolean);
   const merged = [...new Set([...existing, ...newNames])].sort().join(", ");
   return source.replace(re, `${m[1]} ${merged} ${m[3]}`);
 }
@@ -100,7 +101,7 @@ const AppendBlockSchema = z.object({
 const SetStatusSchema = z.object({
   project: z.string().optional(),
   plan_id: z.string(),
-  status: z.enum(["proposed", "approved", "implemented", "abandoned"]),
+  status: z.enum(STATUSES),
 });
 
 const SetStateSchema = z.object({
@@ -122,13 +123,6 @@ const RegisterComponentSchema = z.object({
 const GetPlanSchema = z.object({
   project: z.string().optional(),
   plan_id: z.string(),
-});
-
-const UpdateCardSourceSchema = z.object({
-  project: z.string().optional(),
-  board_id: z.string(),
-  card_id: z.string(),
-  source: z.string().min(1),
 });
 
 const ListPlansSchema = z.object({
@@ -185,45 +179,14 @@ const InitHomepageSchema = z.object({
   project: z.string().optional(),
 });
 
-const CreateCardBoardSchema = z.object({
+const ListCommentsSchema = z.object({
   project: z.string().optional(),
-  id: z.string().regex(/^[a-z][a-z0-9-]*$/),
-  title: z.string().min(1),
-  statuses: z.array(z.string().min(1)).min(1),
 });
 
-const CardRefSchema = z.object({
+const GetCommentsSchema = z.object({
   project: z.string().optional(),
-  board_id: z.string(),
-});
-
-const CreateCardSchema = z.object({
-  project: z.string().optional(),
-  board_id: z.string(),
-  title: z.string().min(1),
-  body: z.string().optional(),
-  status: z.string(),
-});
-
-const UpdateCardSchema = z.object({
-  project: z.string().optional(),
-  board_id: z.string(),
-  card_id: z.string(),
-  title: z.string().optional(),
-  body: z.string().optional(),
-  status: z.string().optional(),
-});
-
-const DeleteCardSchema = z.object({
-  project: z.string().optional(),
-  board_id: z.string(),
-  card_id: z.string(),
-});
-
-const ListCardsSchema = z.object({
-  project: z.string().optional(),
-  board_id: z.string(),
-  status: z.string().optional(),
+  plan_id: z.string().optional(),
+  tab_id: z.string().optional(),
 });
 
 interface CheckItem {
@@ -246,10 +209,10 @@ function defaultProject(arg?: string): string {
 async function callToolImpl(name: string, args: unknown, signal?: AbortSignal): Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }> {
   switch (name) {
     case "wait_for_message": {
-      const queued = state.shiftBacklog();
-      if (queued) {
-        return ok(queued.text);
-      }
+      // Drop anything queued during the previous turn — by the time the
+      // agent gets back here, those messages are stale. Always block for a
+      // fresh single message instead of replaying old work.
+      state.clearBacklog();
       state.setActivity({ kind: "waiting" });
       const text = await new Promise<string>((resolve, reject) => {
         const id = state.registerPending({ kind: "message", resolve });
@@ -296,17 +259,14 @@ async function callToolImpl(name: string, args: unknown, signal?: AbortSignal): 
       const project = defaultProject(a.project);
       try { validatePlanSource(a.source); }
       catch (e) { return err(e instanceof Error ? e.message : String(e)); }
-      // Dry-compile before persisting so the agent never sees ok for a plan
-      // that won't render.
       try { await compileSourceForValidation(a.source, slugify(a.title)); }
       catch (e) { return err(`compile_failed: ${formatCompileError(e)}`); }
       const slug = slugify(a.title);
       const id = nowId(slug);
       const now = new Date().toISOString();
       storage.writePlan({
-        meta: { id, title: a.title, slug, status: "proposed", created: now, modified: now, project },
+        meta: { id, title: a.title, slug, status: "designing", created: now, modified: now, project },
         source: a.source,
-        notes: {},
       });
       const url = `http://localhost:${config.port}/plans/${encodeURIComponent(project)}/${encodeURIComponent(id)}`;
       state.broadcast({ type: "plan.created", planId: id, project });
@@ -319,7 +279,6 @@ async function callToolImpl(name: string, args: unknown, signal?: AbortSignal): 
       const project = defaultProject(a.project);
       const rec = storage.readPlan(project, a.plan_id);
       if (!rec) return err(`plan_not_found: ${a.plan_id}`);
-      if (rec.meta.status === "implemented") return err("plan_frozen");
       try { validateReplacementBlock(a.replacement, a.block_id); }
       catch (e) { return err(e instanceof Error ? e.message : String(e)); }
       let next: string;
@@ -332,8 +291,8 @@ async function callToolImpl(name: string, args: unknown, signal?: AbortSignal): 
       storage.updateSource(project, a.plan_id, next);
       invalidate(storage.basePath(project, a.plan_id) + ".plan.tsx");
       state.broadcast({ type: "block.updated", planId: a.plan_id, project, blockId: a.block_id });
-      if (storage.clearComment(project, a.plan_id, a.block_id)) {
-        state.broadcast({ type: "comment:cleared", project, planId: a.plan_id, blockId: a.block_id });
+      if (storage.clearComment(project, "plan", a.plan_id, a.block_id)) {
+        state.broadcast({ type: "comment:cleared", project, target_kind: "plan", target_id: a.plan_id, blockId: a.block_id });
       }
       return ok({ plan_id: a.plan_id, block_id: a.block_id });
     }
@@ -343,7 +302,6 @@ async function callToolImpl(name: string, args: unknown, signal?: AbortSignal): 
       const project = defaultProject(a.project);
       const rec = storage.readPlan(project, a.plan_id);
       if (!rec) return err(`plan_not_found: ${a.plan_id}`);
-      if (rec.meta.status === "implemented") return err("plan_frozen");
       const appendedIds = blockIdsIn(a.source);
       if (appendedIds.length === 0) return err("appended_source_missing_block: append_block source must contain at least one <Block id=\"…\">…</Block>");
       let base = rec.source;
@@ -359,8 +317,8 @@ async function callToolImpl(name: string, args: unknown, signal?: AbortSignal): 
       invalidate(storage.basePath(project, a.plan_id) + ".plan.tsx");
       for (const blockId of appendedIds) {
         state.broadcast({ type: "block.appended", planId: a.plan_id, project, blockId });
-        if (storage.clearComment(project, a.plan_id, blockId)) {
-          state.broadcast({ type: "comment:cleared", project, planId: a.plan_id, blockId });
+        if (storage.clearComment(project, "plan", a.plan_id, blockId)) {
+          state.broadcast({ type: "comment:cleared", project, target_kind: "plan", target_id: a.plan_id, blockId });
         }
       }
       return ok({ plan_id: a.plan_id, block_ids: appendedIds });
@@ -372,20 +330,6 @@ async function callToolImpl(name: string, args: unknown, signal?: AbortSignal): 
       try { storage.appendComponent(project, a.name, a.source); }
       catch (e) { return err(e instanceof Error ? e.message : String(e)); }
       return ok({ name: a.name, hint: "import this component in your plan/tab source. Run `check` to confirm everything still compiles." });
-    }
-
-    case "update_card_source": {
-      const a = UpdateCardSourceSchema.parse(args);
-      const project = defaultProject(a.project);
-      const board = storage.readCardBoard(project, a.board_id);
-      if (!board) return err(`board_not_found: ${a.board_id}`);
-      const card = board.cards.find((c) => c.id === a.card_id);
-      if (!card) return err(`card_not_found: ${a.card_id}`);
-      try { await compileSourceForValidation(a.source, `card-${a.card_id}`); }
-      catch (e) { return err(`compile_failed: ${formatCompileError(e)}`); }
-      storage.writeCardSource(project, a.board_id, a.card_id, a.source);
-      state.broadcast({ type: "card:updated", project, boardId: a.board_id, cardId: a.card_id });
-      return ok({ card_id: a.card_id, board_id: a.board_id });
     }
 
     case "set_plan_status": {
@@ -417,12 +361,13 @@ async function callToolImpl(name: string, args: unknown, signal?: AbortSignal): 
       const project = defaultProject(a.project);
       const rec = storage.readPlan(project, a.plan_id);
       if (!rec) return err(`plan_not_found: ${a.plan_id}`);
+      const notes = storage.notesFor(project, "plan", a.plan_id);
       try {
         const sourcePath = storage.basePath(project, a.plan_id) + ".plan.tsx";
         const compiled = await compilePlanFile(sourcePath);
-        return ok({ meta: rec.meta, source: rec.source, notes: rec.notes, block_ids: compiled.blockIds, has_mermaid: compiled.hasMermaid });
+        return ok({ meta: rec.meta, source: rec.source, notes, block_ids: compiled.blockIds, has_mermaid: compiled.hasMermaid });
       } catch (e) {
-        return ok({ meta: rec.meta, source: rec.source, notes: rec.notes, compile_error: formatCompileError(e) });
+        return ok({ meta: rec.meta, source: rec.source, notes, compile_error: formatCompileError(e) });
       }
     }
 
@@ -507,10 +452,9 @@ async function callToolImpl(name: string, args: unknown, signal?: AbortSignal): 
       const meta = storage.readProject(project);
       if (!meta) return err(`project_not_found: ${project}`);
       const plans = storage.listPlans(project);
-      const proposed = plans.filter((p) => p.status === "proposed").length;
-      const approved = plans.filter((p) => p.status === "approved").length;
-      const implemented = plans.filter((p) => p.status === "implemented").length;
-      const active = plans.filter((p) => p.status === "proposed" || p.status === "approved");
+      const counts = { designing: 0, ready: 0, implemented: 0, rejected: 0 } as Record<string, number>;
+      for (const p of plans) counts[p.status] = (counts[p.status] ?? 0) + 1;
+      const active = plans.filter((p) => p.status === "designing" || p.status === "ready");
       const done = plans.filter((p) => p.status === "implemented");
       const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/`/g, "\\`");
       const planItems = (list: typeof plans) =>
@@ -518,16 +462,17 @@ async function callToolImpl(name: string, args: unknown, signal?: AbortSignal): 
       const source = `import { Plan, Block, Callout, FileList, DecisionPanel } from "@web-planner/kit";
 
 export default () => (
-  <Plan title="${esc(meta.name || meta.slug)}" status="proposed">
+  <Plan title="${esc(meta.name || meta.slug)}" status="designing">
     <Block id="b-home-header" kind="summary">
       <Callout>${esc(meta.description || "Project homepage. Ask the planner to update this description.")}</Callout>
     </Block>
 
     <Block id="b-home-stats" kind="detail">
       <p>
-        <strong>${proposed}</strong> proposed ·{" "}
-        <strong>${approved}</strong> approved ·{" "}
-        <strong>${implemented}</strong> implemented
+        <strong>${counts.designing}</strong> designing ·{" "}
+        <strong>${counts.ready}</strong> ready ·{" "}
+        <strong>${counts.implemented}</strong> implemented ·{" "}
+        <strong>${counts.rejected}</strong> rejected
       </p>
     </Block>${active.length > 0 ? `
 
@@ -569,56 +514,33 @@ ${planItems(done)}
       return ok({ project, tab_id: "home", url });
     }
 
-    case "create_card_board": {
-      const a = CreateCardBoardSchema.parse(args);
+    case "list_comments": {
+      const a = ListCommentsSchema.parse(args);
       const project = defaultProject(a.project);
-      try { storage.createCardBoard(project, a.id, a.title, a.statuses); }
-      catch (e) { return err(e instanceof Error ? e.message : String(e)); }
-      state.broadcast({ type: "project.updated", project });
-      return ok({ project, board_id: a.id, title: a.title, statuses: a.statuses });
+      const meta = storage.readProject(project);
+      if (!meta) return err(`project_not_found: ${project}`);
+      const comments = storage.listComments(project);
+      const planTitles = new Map(storage.listPlans(project).map((p) => [p.id, p.title]));
+      const tabTitles = new Map(meta.tabs.map((t) => [t.id, t.title]));
+      const enriched = comments.map((c) => ({
+        ...c,
+        target_title: c.target_kind === "plan" ? planTitles.get(c.target_id) ?? null : tabTitles.get(c.target_id) ?? null,
+      }));
+      return ok({ project, count: enriched.length, comments: enriched });
     }
 
-    case "create_card": {
-      const a = CreateCardSchema.parse(args);
+    case "get_comments": {
+      const a = GetCommentsSchema.parse(args);
+      if (!a.plan_id && !a.tab_id) return err("missing_target: pass either plan_id or tab_id");
+      if (a.plan_id && a.tab_id) return err("ambiguous_target: pass only one of plan_id or tab_id");
       const project = defaultProject(a.project);
-      try {
-        const card = storage.addCard(project, a.board_id, a.title, a.body ?? "", a.status);
-        state.broadcast({ type: "board:changed", project, boardId: a.board_id });
-        return ok({ card_id: card.id, board_id: a.board_id, status: card.status });
-      } catch (e) { return err(e instanceof Error ? e.message : String(e)); }
-    }
-
-    case "update_card": {
-      const a = UpdateCardSchema.parse(args);
-      const project = defaultProject(a.project);
-      try {
-        const card = storage.updateCard(project, a.board_id, a.card_id, {
-          ...(a.title !== undefined ? { title: a.title } : {}),
-          ...(a.body !== undefined ? { body: a.body } : {}),
-          ...(a.status !== undefined ? { status: a.status } : {}),
-        });
-        state.broadcast({ type: "board:changed", project, boardId: a.board_id });
-        return ok({ card_id: card.id, board_id: a.board_id, status: card.status });
-      } catch (e) { return err(e instanceof Error ? e.message : String(e)); }
-    }
-
-    case "delete_card": {
-      const a = DeleteCardSchema.parse(args);
-      const project = defaultProject(a.project);
-      try {
-        const removed = storage.deleteCard(project, a.board_id, a.card_id);
-        state.broadcast({ type: "board:changed", project, boardId: a.board_id });
-        return ok({ deleted: removed, card_id: a.card_id });
-      } catch (e) { return err(e instanceof Error ? e.message : String(e)); }
-    }
-
-    case "list_cards": {
-      const a = ListCardsSchema.parse(args);
-      const project = defaultProject(a.project);
-      try {
-        const cards = storage.listCards(project, a.board_id, a.status);
-        return ok({ board_id: a.board_id, count: cards.length, cards });
-      } catch (e) { return err(e instanceof Error ? e.message : String(e)); }
+      const target_kind = a.plan_id ? "plan" : "tab";
+      const target_id = (a.plan_id ?? a.tab_id) as string;
+      const comments = storage.getComments(project, target_kind, target_id);
+      let target_title: string | null = null;
+      if (target_kind === "plan") target_title = storage.readPlan(project, target_id)?.meta.title ?? null;
+      else target_title = storage.readProject(project)?.tabs.find((t) => t.id === target_id)?.title ?? null;
+      return ok({ project, target_kind, target_id, target_title, count: comments.length, comments });
     }
 
     case "check": {
@@ -638,8 +560,6 @@ ${planItems(done)}
         : meta.tabs.filter((t) => t.kind === "custom");
       if (a.tab_id && tabs.length === 0) return err(`tab_not_found: ${a.tab_id}`);
 
-      // If both plan_id and tab_id were omitted we check everything;
-      // if one was given, narrow accordingly.
       const checkPlans = a.tab_id ? [] : plans;
       const checkTabs = a.plan_id && !a.tab_id ? [] : tabs;
 
@@ -693,31 +613,27 @@ function maybeOpen(url: string, policy: "always" | "on-ask" | "never") {
 // ---------- MCP wiring ----------
 
 const TOOLS = [
-  { name: "wait_for_message", description: "Block until the user sends a message (browser chat, wp send, or feedback bundle). No timeout. The planner's outer-loop primitive.", inputSchema: { type: "object", properties: {} } },
+  { name: "wait_for_message", description: "Block until the user sends a message (browser chat, wp send, or feedback bundle). No timeout. Outer-loop primitive — comments, chat, and feedback bundles from ANY plan or tab reach you through this single call.", inputSchema: { type: "object", properties: {} } },
   { name: "ask_user", description: "Push structured questions to the browser; block until the user submits. Times out cleanly.", inputSchema: { type: "object", properties: { questions: { type: "array" }, timeout_seconds: { type: "number" } }, required: ["questions"] } },
-  { name: "create_plan", description: "Submit a full .plan.tsx source. Server validates structure + block ids and dry-compiles before persisting; on compile_failed the plan is NOT saved.", inputSchema: { type: "object", properties: { title: { type: "string" }, source: { type: "string" }, project: { type: "string" } }, required: ["title","source"] } },
-  { name: "update_block", description: "Replace one <Block id='...'> in a plan. Replacement MUST be exactly one <Block> with the same id. Server dry-compiles the resulting plan; rejected on implemented plans.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, block_id: { type: "string" }, replacement: { type: "string" }, project: { type: "string" } }, required: ["plan_id","block_id","replacement"] } },
-  { name: "append_block", description: "Insert one or more new <Block>s after an existing one (or before </Plan>). Optionally pass imports[] with component names to merge into the plan's @web-planner/kit import line (avoids needing to recreate the plan just to add an import). Server dry-compiles before persisting.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, source: { type: "string" }, after_block_id: { type: "string" }, imports: { type: "array", items: { type: "string" } }, project: { type: "string" } }, required: ["plan_id","source"] } },
-  { name: "register_component", description: "Append a Preact component to the project's components.tsx for use as a new block kind. You must then import it in your plan/tab source.", inputSchema: { type: "object", properties: { name: { type: "string" }, source: { type: "string" }, project: { type: "string" } }, required: ["name","source"] } },
-  { name: "set_plan_status", description: "Move plan between proposed/approved/implemented/abandoned. Implemented plans become read-only (but can still be delete_plan'd).", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, status: { type: "string" }, project: { type: "string" } }, required: ["plan_id","status"] } },
-  { name: "set_state", description: "Override the implicit activity state (e.g. 'implementing' while running edits).", inputSchema: { type: "object", properties: { state: { type: "string" } }, required: ["state"] } },
+  { name: "create_plan", description: "Submit a full .plan.tsx source. Server validates structure + block ids and dry-compiles before persisting. New plans start in status 'designing'.", inputSchema: { type: "object", properties: { title: { type: "string" }, source: { type: "string" }, project: { type: "string" } }, required: ["title","source"] } },
+  { name: "update_block", description: "Replace one <Block id='...'> in a plan. Replacement MUST be exactly one <Block> with the same id. Allowed on plans of any status — there is no frozen state.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, block_id: { type: "string" }, replacement: { type: "string" }, project: { type: "string" } }, required: ["plan_id","block_id","replacement"] } },
+  { name: "append_block", description: "Insert one or more new <Block>s after an existing one. Pass imports[] to merge component names into the plan's @web-planner/kit import line. Allowed on plans of any status.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, source: { type: "string" }, after_block_id: { type: "string" }, imports: { type: "array", items: { type: "string" } }, project: { type: "string" } }, required: ["plan_id","source"] } },
+  { name: "register_component", description: "Append a Preact component to the project's components.tsx for use as a new block kind. Then import it in your plan/tab source.", inputSchema: { type: "object", properties: { name: { type: "string" }, source: { type: "string" }, project: { type: "string" } }, required: ["name","source"] } },
+  { name: "set_plan_status", description: "Move plan between designing / ready / implemented / rejected. All statuses remain editable and commentable.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, status: { type: "string", enum: ["designing","ready","implemented","rejected"] }, project: { type: "string" } }, required: ["plan_id","status"] } },
+  { name: "set_state", description: "Override the activity state surfaced by the dashboard pill (e.g. 'implementing' while editing files).", inputSchema: { type: "object", properties: { state: { type: "string" } }, required: ["state"] } },
   { name: "list_plans", description: "List plans for a project (or all projects).", inputSchema: { type: "object", properties: { project: { type: "string" } } } },
-  { name: "get_plan", description: "Read a plan: source, notes, block ids. Includes compile_error if the persisted plan currently fails to render.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, project: { type: "string" } }, required: ["plan_id"] } },
+  { name: "get_plan", description: "Read a plan: source, notes, block ids. Notes are the unified comments scoped to this plan.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, project: { type: "string" } }, required: ["plan_id"] } },
   { name: "open_in_browser", description: "Spawn the configured open-command against a plan or the dashboard.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, project: { type: "string" } } } },
-  { name: "set_project_meta", description: "Set a project's name, description, and/or watchPath (the source directory shown in the Layout tab).", inputSchema: { type: "object", properties: { project: { type: "string" }, name: { type: "string" }, description: { type: "string" }, watch_path: { type: "string" } } } },
+  { name: "set_project_meta", description: "Set a project's name, description, and/or watchPath (source dir for the Layout tab).", inputSchema: { type: "object", properties: { project: { type: "string" }, name: { type: "string" }, description: { type: "string" }, watch_path: { type: "string" } } } },
   { name: "create_tab", description: "Create a custom tab on a project's page from a Preact .tab.tsx source. id must be lowercase kebab. Dry-compiled before persisting.", inputSchema: { type: "object", properties: { project: { type: "string" }, id: { type: "string" }, title: { type: "string" }, source: { type: "string" } }, required: ["id","title","source"] } },
   { name: "update_tab", description: "Update an existing custom tab's source. Dry-compiled before persisting.", inputSchema: { type: "object", properties: { project: { type: "string" }, id: { type: "string" }, title: { type: "string" }, source: { type: "string" } }, required: ["id","source"] } },
   { name: "get_project", description: "Read project metadata (name, description, watchPath, tabs).", inputSchema: { type: "object", properties: { project: { type: "string" } } } },
-  { name: "delete_plan", description: "Permanently delete a plan (source + meta + notes). Allowed on any status, including implemented. Broadcasts plan.deleted on SSE.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, project: { type: "string" } }, required: ["plan_id"] } },
-  { name: "check", description: "Re-compile a plan, a custom tab, or every plan + custom tab in a project. Returns { ok, items: [{ kind, id, ok, error?, block_ids? }] }. Call after every create/update to confirm the persisted state renders.", inputSchema: { type: "object", properties: { project: { type: "string" }, plan_id: { type: "string" }, tab_id: { type: "string" } } } },
-  { name: "set_theme", description: "Set the colour theme for a project. Pass a preset name ('catppuccin-mocha', 'catppuccin-latte', 'nord', 'gruvbox-dark') or a Record<string,string> of CSS variable overrides merged over the default.", inputSchema: { type: "object", properties: { project: { type: "string" }, theme: {} }, required: ["theme"] } },
-  { name: "init_project_homepage", description: "Create or regenerate the Home tab for a project: project header, plan counts, plan links, and a DecisionPanel quick-start. The Home tab is inserted first so it opens by default.", inputSchema: { type: "object", properties: { project: { type: "string" } } } },
-  { name: "create_card_board", description: "Create a new card board tab with user-defined statuses. Cards in the board have a title, optional body, and one of the defined statuses.", inputSchema: { type: "object", properties: { project: { type: "string" }, id: { type: "string" }, title: { type: "string" }, statuses: { type: "array", items: { type: "string" } } }, required: ["id","title","statuses"] } },
-  { name: "create_card", description: "Add a card to a board.", inputSchema: { type: "object", properties: { project: { type: "string" }, board_id: { type: "string" }, title: { type: "string" }, body: { type: "string" }, status: { type: "string" } }, required: ["board_id","title","status"] } },
-  { name: "update_card", description: "Update a card's title, body, or status.", inputSchema: { type: "object", properties: { project: { type: "string" }, board_id: { type: "string" }, card_id: { type: "string" }, title: { type: "string" }, body: { type: "string" }, status: { type: "string" } }, required: ["board_id","card_id"] } },
-  { name: "delete_card", description: "Permanently delete a card from a board.", inputSchema: { type: "object", properties: { project: { type: "string" }, board_id: { type: "string" }, card_id: { type: "string" } }, required: ["board_id","card_id"] } },
-  { name: "list_cards", description: "List all cards on a board, optionally filtered by status.", inputSchema: { type: "object", properties: { project: { type: "string" }, board_id: { type: "string" }, status: { type: "string" } }, required: ["board_id"] } },
-  { name: "update_card_source", description: "Author or revise the Preact TSX source for a card page. Dry-compiled before persisting. Call this when handling [expand-card cardId=…] messages to flesh out the card's block content.", inputSchema: { type: "object", properties: { project: { type: "string" }, board_id: { type: "string" }, card_id: { type: "string" }, source: { type: "string" } }, required: ["board_id","card_id","source"] } },
+  { name: "delete_plan", description: "Permanently delete a plan (source + meta + comments). Allowed on any status.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, project: { type: "string" } }, required: ["plan_id"] } },
+  { name: "check", description: "Re-compile a plan, a custom tab, or every plan + custom tab in a project. Returns { ok, items: [...] }. Call after every create/update.", inputSchema: { type: "object", properties: { project: { type: "string" }, plan_id: { type: "string" }, tab_id: { type: "string" } } } },
+  { name: "set_theme", description: "Set the colour theme for a project. Pass a preset name ('catppuccin-mocha', 'catppuccin-latte', 'nord', 'gruvbox-dark') or a Record<string,string> of CSS variable overrides.", inputSchema: { type: "object", properties: { project: { type: "string" }, theme: {} }, required: ["theme"] } },
+  { name: "init_project_homepage", description: "Create or regenerate the Home tab: project header, plan counts, plan links, and a DecisionPanel quick-start.", inputSchema: { type: "object", properties: { project: { type: "string" } } } },
+  { name: "list_comments", description: "Return EVERY open comment in the project, across plans and tabs. Each comment carries target_kind ('plan'|'tab'), target_id, target_title, block_id, text, and timestamps. Use this on resume to sweep for anything that arrived while you were busy.", inputSchema: { type: "object", properties: { project: { type: "string" } } } },
+  { name: "get_comments", description: "Return comments for one target — pass exactly one of plan_id or tab_id. Returns the same enriched shape as list_comments, scoped.", inputSchema: { type: "object", properties: { project: { type: "string" }, plan_id: { type: "string" }, tab_id: { type: "string" } } } },
 ];
 
 function spawnExistingWatchers() {
@@ -732,7 +648,7 @@ function spawnExistingWatchers() {
 async function main() {
   await startHttp();
   spawnExistingWatchers();
-  const server = new Server({ name: "web-planner", version: "0.1.0" }, { capabilities: { tools: {} } });
+  const server = new Server({ name: "web-planner", version: "0.2.0" }, { capabilities: { tools: {} } });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
   server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
