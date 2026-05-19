@@ -637,6 +637,11 @@
     const block = anchor;
     if (!block) return;
     const existing = (PLAN.notes || {})[blockId] || "";
+    const isTabComment = blockId.includes("~");
+    const [commentBlockId, commentTabId] = isTabComment ? blockId.split("~", 2) : [blockId, null];
+    const commentTargetKind = isTabComment ? "tab" : "plan";
+    const commentTargetId = isTabComment ? commentTabId : PLAN.id;
+    const commentBlockKey = isTabComment ? commentBlockId : blockId;
     const pop = document.createElement("div");
     pop.className = "popover";
     pop.setAttribute("data-comment-block", blockId);
@@ -666,7 +671,7 @@
         const r = await fetch("/api/comment", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ project: PLAN.project, planId: PLAN.id, blockId, text: "" }),
+          body: JSON.stringify({ project: PLAN.project, target_kind: commentTargetKind, target_id: commentTargetId, block_id: commentBlockKey, text: "" }),
         });
         if (r.ok) {
           clearCommentUi(blockId);
@@ -684,7 +689,7 @@
       const r = await fetch("/api/comment", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ project: PLAN.project, planId: PLAN.id, blockId, text }),
+        body: JSON.stringify({ project: PLAN.project, target_kind: commentTargetKind, target_id: commentTargetId, block_id: commentBlockKey, text }),
       });
       if (r.ok) {
         PLAN.notes = PLAN.notes || {};
