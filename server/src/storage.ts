@@ -189,7 +189,7 @@ export class Storage {
   writeTab(project: string, id: string, title: string, source: string): ProjectMeta {
     this.ensureProject(project);
     if (!/^[a-z][a-z0-9-]*$/.test(id)) throw new Error(`invalid_tab_id: ${id} (must be lowercase kebab)`);
-    if (id === "plans" || id === "layout") throw new Error(`reserved_tab_id: ${id}`);
+    if (id === "plans" || id === "layout" || id === "modals") throw new Error(`reserved_tab_id: ${id}`);
     atomicWrite(this.tabPath(project, id), source);
     const meta = this.readProject(project)!;
     const i = meta.tabs.findIndex((t) => t.id === id);
@@ -259,6 +259,13 @@ export class Storage {
     rec.meta.modified = new Date().toISOString();
     const base = this.basePath(project, planId);
     atomicWrite(base + META_SUFFIX, JSON.stringify(rec.meta, null, 2));
+    // Keep the source's <Plan status="..."> attribute in sync so re-renders
+    // and re-compiles don't show stale state. Same regex the migration uses.
+    const patchedSource = rec.source.replace(/(<Plan\b[^>]*\sstatus=")([^"]+)(")/, (_m, a, _b, c) => `${a}${status}${c}`);
+    if (patchedSource !== rec.source) {
+      atomicWrite(base + SOURCE_SUFFIX, patchedSource);
+      rec.source = patchedSource;
+    }
     return rec;
   }
 

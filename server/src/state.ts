@@ -7,6 +7,7 @@ export interface PendingAsk {
   kind: "ask_user";
   resolve: (answers: { questions: AskedQuestion[]; answers: unknown[] } | { timed_out: true }) => void;
   questions: AskedQuestion[];
+  timeout?: ReturnType<typeof setTimeout>;
 }
 export type Pending = PendingMessage | PendingAsk;
 
@@ -62,13 +63,10 @@ class State {
   }
 
   /**
-   * Drop every queued backlog entry. Called on entry to wait_for_message:
-   * anything queued during the previous turn reflects a context the agent
-   * has already left behind, so the planner should listen fresh for the
-   * next real message instead of replaying stale work.
-   *
-   * Broadcasts `backlog:cleared` (with the dropped count) so the browser
-   * can surface a hint that older messages were discarded.
+   * Drop every queued backlog entry. Kept for callers that explicitly want
+   * a hard reset; wait_for_message uses `takeFreshest` instead so users
+   * never see a message vanish that was sent moments before the agent's
+   * next listen.
    */
   clearBacklog(): number {
     const dropped = this.backlog.length;
@@ -76,6 +74,24 @@ class State {
     this.backlog = [];
     this.broadcast({ type: "backlog:cleared", dropped });
     return dropped;
+  }
+
+  /**
+   * Consume the most recently queued backlog entry. Any older entries are
+   * dropped (broadcast as backlog:cleared so the UI can surface a hint).
+   * Used at the top of wait_for_message: anything queued during the previous
+   * turn reflects context the planner has already left behind, but the
+   * single freshest message likely still matters to the user.
+   */
+  takeFreshest(): BacklogEntry | undefined {
+    if (this.backlog.length === 0) return undefined;
+    const freshest = this.backlog[this.backlog.length - 1];
+    const skipped = this.backlog.length - 1;
+    this.backlog = [];
+    if (skipped > 0) {
+      this.broadcast({ type: "backlog:cleared", dropped: skipped });
+    }
+    return freshest;
   }
 
   peekBacklog(): BacklogEntry[] {

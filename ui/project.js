@@ -6,6 +6,10 @@
   if (!page) return;
   const project = page.getAttribute("data-project");
 
+  // Surface errors as toasts when app.js's showToast is mounted; fall back to
+  // alert() only as a last resort (e.g. SSR-blocked or app.js failed to load).
+  function showError(text) { (window.__showToast || alert)(text, "error"); }
+
   // ---------- Tab switching (client-side) ----------
   const tabs = document.querySelectorAll(".tab-bar .tab");
   const panel = document.querySelector("[data-tab-panel]");
@@ -17,7 +21,6 @@
       tabs.forEach((x) => x.classList.toggle("active", x === t));
       page.setAttribute("data-active-tab", id);
       history.replaceState(null, "", "?tab=" + encodeURIComponent(id));
-      try { localStorage.setItem("wp:tab:" + project, id); } catch {}
       try {
         const r = await fetch(`/projects/${encodeURIComponent(project)}/tab/${encodeURIComponent(id)}`);
         panel.innerHTML = await r.text();
@@ -163,7 +166,7 @@
       });
       if (!r.ok) {
         const e = await r.json().catch(() => ({}));
-        alert("status change failed: " + (e.error || r.status));
+        showError("status change failed: " + (e.error || r.status));
         // Roll back by refetching from server.
         refetchActiveTab();
         return;
@@ -171,7 +174,7 @@
       // Refetch to sync any other modifications and authoritative order.
       refetchActiveTab();
     } catch (e) {
-      alert("status change failed: " + e);
+      showError("status change failed: " + e);
       refetchActiveTab();
     }
   });
@@ -212,12 +215,12 @@
       });
       if (!r.ok) {
         const e = await r.json().catch(() => ({}));
-        alert("delete failed: " + (e.error || r.status));
+        showError("delete failed: " + (e.error || r.status));
         btn.disabled = false;
       }
       // Refresh handled by SSE plan.deleted.
     } catch (e) {
-      alert("delete failed: " + e);
+      showError("delete failed: " + e);
       btn.disabled = false;
     }
   });
@@ -241,7 +244,7 @@
     }
     const overlay = document.createElement("div");
     overlay.className = "modal-overlay";
-    overlay.style.cssText = "position:fixed;inset:0;display:flex;align-items:center;justify-content:center;z-index:59;";
+    overlay.setAttribute("aria-label", "New plan");
     const modal = document.createElement("div");
     modal.className = "popover";
     modal.style.cssText = "width:480px;max-width:calc(100vw - 32px);max-height:calc(100vh - 64px);overflow-y:auto;";
@@ -257,14 +260,15 @@
       </div>`;
     overlay.appendChild(modal);
     document.body.appendChild(overlay);
+    const controller = (window.__wpBar?.wireModal || ((el) => ({ close: () => el.remove() })))(overlay);
     const titleInput = modal.querySelector(".new-plan-title");
     titleInput && titleInput.focus();
-    modal.querySelector(".cancel").addEventListener("click", () => overlay.remove());
-    overlay.addEventListener("click", (ev) => { if (!modal.contains(ev.target)) overlay.remove(); });
+    modal.querySelector(".cancel").addEventListener("click", () => controller.close());
+    overlay.addEventListener("click", (ev) => { if (!modal.contains(ev.target)) controller.close(); });
     modal.querySelector(".save").addEventListener("click", async () => {
       const title = titleInput ? titleInput.value.trim() : "";
       const brief = modal.querySelector(".new-plan-brief")?.value.trim() || "";
-      if (!title || !brief) { alert("Title and brief are required."); return; }
+      if (!title || !brief) { showError("Title and brief are required."); return; }
       const saveBtn = modal.querySelector(".save");
       saveBtn.disabled = true; saveBtn.textContent = "Creating…";
       try {
@@ -273,9 +277,9 @@
           body: JSON.stringify({ title, brief, project }),
         });
         const data = await r.json().catch(() => ({}));
-        if (r.ok) { overlay.remove(); if (data.url) location.href = data.url; }
-        else { alert("create failed: " + (data.error || r.status)); saveBtn.disabled = false; saveBtn.textContent = "Create"; }
-      } catch (e) { alert("create failed: " + e); saveBtn.disabled = false; saveBtn.textContent = "Create"; }
+        if (r.ok) { controller.close(); if (data.url) location.href = data.url; }
+        else { showError("create failed: " + (data.error || r.status)); saveBtn.disabled = false; saveBtn.textContent = "Create"; }
+      } catch (e) { showError("create failed: " + e); saveBtn.disabled = false; saveBtn.textContent = "Create"; }
     });
   }
 
@@ -367,17 +371,17 @@
       delBtn.addEventListener("click", async () => {
         delBtn.disabled = true;
         try {
-          const r = await fetch("/api/tab-comment", {
+          const r = await fetch("/api/comment", {
             method: "POST", headers: { "content-type": "application/json" },
-            body: JSON.stringify({ project, tabId, blockId, text: "" }),
+            body: JSON.stringify({ project, target_kind: "tab", target_id: tabId, block_id: blockId, text: "" }),
           });
           if (r.ok) {
             block.removeAttribute("data-has-comment");
             triggerBtn.textContent = "+ comment";
             triggerBtn.removeAttribute("data-comment-text");
             pop.remove();
-          } else { const e = await r.json().catch(() => ({})); alert("delete failed: " + (e.error || r.status)); delBtn.disabled = false; }
-        } catch (e) { alert("delete failed: " + e); delBtn.disabled = false; }
+          } else { const e = await r.json().catch(() => ({})); showError("delete failed: " + (e.error || r.status)); delBtn.disabled = false; }
+        } catch (e) { showError("delete failed: " + e); delBtn.disabled = false; }
       });
     }
     pop.querySelector(".save").addEventListener("click", async () => {
@@ -386,17 +390,17 @@
       const saveBtn = pop.querySelector(".save");
       saveBtn.disabled = true;
       try {
-        const r = await fetch("/api/tab-comment", {
+        const r = await fetch("/api/comment", {
           method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ project, tabId, blockId, text }),
+          body: JSON.stringify({ project, target_kind: "tab", target_id: tabId, block_id: blockId, text }),
         });
         if (r.ok) {
           block.setAttribute("data-has-comment", "true");
           triggerBtn.textContent = "edit comment";
           triggerBtn.setAttribute("data-comment-text", text);
           pop.remove();
-        } else { const e = await r.json().catch(() => ({})); alert("save failed: " + (e.error || r.status)); saveBtn.disabled = false; }
-      } catch (e) { alert("save failed: " + e); saveBtn.disabled = false; }
+        } else { const e = await r.json().catch(() => ({})); showError("save failed: " + (e.error || r.status)); saveBtn.disabled = false; }
+      } catch (e) { showError("save failed: " + e); saveBtn.disabled = false; }
     });
     function _outerClickTabPop(ev) {
       if (!pop.contains(ev.target) && !ev.target?.closest?.(".comment-btn")) {
@@ -429,7 +433,6 @@
     }
     const overlay = document.createElement("div");
     overlay.className = "modal-overlay";
-    overlay.style.cssText = "position:fixed;inset:0;display:flex;align-items:center;justify-content:center;z-index:59;";
     const modal = document.createElement("div");
     modal.className = "popover";
     modal.style.cssText = "width:480px;max-width:calc(100vw - 32px);max-height:calc(100vh - 64px);overflow-y:auto;";
@@ -447,25 +450,26 @@
       <div class="new-tab-status" hidden style="margin-top:8px;font-size:0.85rem;color:var(--subtext1);"></div>`;
     overlay.appendChild(modal);
     document.body.appendChild(overlay);
+    const controller = (window.__wpBar?.wireModal || ((el) => ({ close: () => el.remove() })))(overlay);
 
     const titleInput = modal.querySelector(".new-tab-title");
     const saveBtn = modal.querySelector(".save");
     const errorEl = modal.querySelector(".modal-error");
 
-    function showError(msg) { errorEl.style.display = ""; errorEl.textContent = msg; }
+    function showInlineError(msg) { errorEl.style.display = ""; errorEl.textContent = msg; }
     function clearError() { errorEl.style.display = "none"; }
 
     titleInput && titleInput.focus();
-    modal.querySelector(".cancel").addEventListener("click", () => overlay.remove());
-    overlay.addEventListener("click", (ev) => { if (!modal.contains(ev.target)) overlay.remove(); });
+    modal.querySelector(".cancel").addEventListener("click", () => controller.close());
+    overlay.addEventListener("click", (ev) => { if (!modal.contains(ev.target)) controller.close(); });
 
     saveBtn.addEventListener("click", async () => {
       clearError();
       const title = titleInput ? titleInput.value.trim() : "";
-      if (!title) { showError("Title is required."); return; }
+      if (!title) { showInlineError("Title is required."); return; }
 
       const purpose = modal.querySelector(".new-tab-purpose")?.value.trim() || "";
-      if (!purpose) { showError("Purpose is required."); return; }
+      if (!purpose) { showInlineError("Purpose is required."); return; }
       const statusEl = modal.querySelector(".new-tab-status");
       saveBtn.disabled = true; saveBtn.textContent = "Sending to planner…";
       statusEl.hidden = false; statusEl.textContent = "Planner is generating the tab…";
@@ -475,15 +479,15 @@
           body: JSON.stringify({ title, purpose, project }),
         });
         const data = await r.json().catch(() => ({}));
-        if (!r.ok) { showError("Create failed: " + (data.error || r.status)); saveBtn.disabled = false; saveBtn.textContent = "Create with AI"; statusEl.hidden = true; return; }
+        if (!r.ok) { showInlineError("Create failed: " + (data.error || r.status)); saveBtn.disabled = false; saveBtn.textContent = "Create with AI"; statusEl.hidden = true; return; }
         statusEl.textContent = data.queued ? "Queued — planner is busy. Tab will appear when ready." : "Planner is working… (page will reload when done)";
         const _modalTid = setTimeout(() => {
-          overlay.remove();
-          (window.__showToast || alert)("The planner didn't respond in 60 s — check the chat panel.");
+          controller.close();
+          showError("The planner didn't respond in 60 s — check the chat panel.");
         }, 60000);
         modal.setAttribute("data-waiting", "1");
         modal.setAttribute("data-timeout-id", String(_modalTid));
-      } catch (e) { showError("Create failed: " + e); saveBtn.disabled = false; saveBtn.textContent = "Create with AI"; statusEl.hidden = true; }
+      } catch (e) { showInlineError("Create failed: " + e); saveBtn.disabled = false; saveBtn.textContent = "Create with AI"; statusEl.hidden = true; }
     });
   }
 
@@ -580,13 +584,13 @@
     if ((msg.type === "modal.open" || msg.type === "modal.deleted" || msg.type === "modals.cleared") && msg.project === project) {
       if (page.getAttribute("data-active-tab") === "modals") refetchActiveTab();
     }
-    if ((msg.type === "tab:comment:set" || msg.type === "tab:comment:cleared") && msg.project === project) {
+    if ((msg.type === "comment:set" || msg.type === "comment:cleared") && msg.project === project && msg.target_kind === "tab") {
       const active = page.getAttribute("data-active-tab");
-      if (active === msg.tabId) {
+      if (active === msg.target_id) {
         const block = panel.querySelector(`[data-block-id="${CSS.escape(msg.blockId)}"]`);
         if (block) {
           const btn = panel.querySelector(`.comment-btn[data-comment-for="${CSS.escape(msg.blockId)}"]`);
-          if (msg.type === "tab:comment:set") {
+          if (msg.type === "comment:set") {
             block.setAttribute("data-has-comment", "true");
             block.setAttribute("data-comment-text", msg.text || "");
             if (btn) { btn.textContent = "edit comment"; btn.setAttribute("data-comment-text", msg.text || ""); }

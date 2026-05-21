@@ -26,6 +26,7 @@ import {
   PlanCompileError,
 } from "./compile.js";
 import { startWatch } from "./layout.js";
+import { nowId, slugify } from "./ids.js";
 
 // ---------- helpers ----------
 
@@ -48,17 +49,11 @@ function formatCompileError(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-function nowId(slug: string): string {
-  const d = new Date();
-  const ts = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}-${String(d.getHours()).padStart(2,"0")}${String(d.getMinutes()).padStart(2,"0")}`;
-  return `${ts}-${slug}`;
-}
-function slugify(title: string): string {
-  return title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60) || "plan";
-}
-
 function mergeKitImports(source: string, newNames: string[]): string {
-  const re = /^(import\s*\{)([^}]+)(\}\s*from\s*["']@web-planner\/kit["'];?)$/m;
+  // Tolerate multi-line import bodies — the previous regex anchored to a
+  // single line (^...$ with /m) and silently no-op'd on any wrapped import,
+  // producing a "Component is not defined" failure at compile time.
+  const re = /(import\s*\{)([^}]+)(\}\s*from\s*["']@web-planner\/kit["'];?)/;
   const m = source.match(re);
   if (!m) return source;
   const existing = m[2]!.split(",").map((s) => s.trim()).filter(Boolean);
@@ -210,10 +205,13 @@ function defaultProject(arg?: string): string {
 async function callToolImpl(name: string, args: unknown, signal?: AbortSignal): Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }> {
   switch (name) {
     case "wait_for_message": {
-      // Drop anything queued during the previous turn — by the time the
-      // agent gets back here, those messages are stale. Always block for a
-      // fresh single message instead of replaying old work.
-      state.clearBacklog();
+      // If anything queued during the previous turn, deliver the FRESHEST
+      // entry immediately and drop the older ones. The freshest is almost
+      // always what the user actually wants the agent to answer; dropping
+      // everything (the previous behavior) silently swallowed messages
+      // racing with the call.
+      const fresh = state.takeFreshest();
+      if (fresh) return ok(fresh.text);
       state.setActivity({ kind: "waiting" });
       const text = await new Promise<string>((resolve, reject) => {
         const id = state.registerPending({ kind: "message", resolve });
@@ -230,10 +228,14 @@ async function callToolImpl(name: string, args: unknown, signal?: AbortSignal): 
       const questions: AskedQuestion[] = a.questions;
       state.setActivity({ kind: "asking" });
       const result = await new Promise<{ questions: AskedQuestion[]; answers: unknown[] } | { timed_out: true }>((resolve) => {
-        const id = state.registerPending({ kind: "ask_user", resolve, questions });
+        const pending: import("./state.js").PendingAsk = { kind: "ask_user", resolve, questions };
+        const id = state.registerPending(pending);
         state.broadcast({ type: "ask_user:open", id, payload: { questions, timeout_seconds: a.timeout_seconds ?? 1800 } });
         if (a.timeout_seconds && a.timeout_seconds > 0) {
-          setTimeout(() => {
+          // Store the handle on the pending entry so handleAnswer can clear
+          // it when the user submits; otherwise the timer kept a closure
+          // pinned in memory for up to 30 minutes per ask.
+          pending.timeout = setTimeout(() => {
             const still = state.takePending(id);
             if (still && still.kind === "ask_user") still.resolve({ timed_out: true });
           }, a.timeout_seconds * 1000);
@@ -395,8 +397,9 @@ async function callToolImpl(name: string, args: unknown, signal?: AbortSignal): 
       catch (e) { return err(e instanceof Error ? e.message : String(e)); }
       try { await compileSourceForValidation(a.source, `tab-${a.id}`); }
       catch (e) { return err(`compile_failed: ${formatCompileError(e)}`); }
-      const title = ("title" in a && a.title) ? a.title : a.id;
       const existingMeta = storage.readProject(project);
+      const existingTitle = existingMeta?.tabs.find((t) => t.id === a.id)?.title;
+      const title = ("title" in a && a.title) ? a.title : (existingTitle ?? a.id);
       const isNew = name === "create_tab" && !existingMeta?.tabs.some((t) => t.id === a.id);
       storage.writeTab(project, a.id, title, a.source);
       invalidate(storage.tabPath(project, a.id));

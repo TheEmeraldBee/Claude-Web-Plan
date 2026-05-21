@@ -26,10 +26,56 @@
   --readable-width: 740px;
   --wide-width: 980px;
   --gutter: clamp(24px, 6vw, 96px);
+
+  /* z-index scale. Use these instead of hard-coded numbers so the layering
+     order is reviewable in one place and ad-hoc values can't accidentally
+     leapfrog a higher-priority overlay (e.g. a popover under the toast). */
+  --z-base: 1;
+  --z-bar: 40;
+  --z-popover: 50;
+  --z-help: 55;
+  --z-modal: 80;
+  --z-fullscreen: 100;
+  --z-toast: 200;
 }
 
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
+
+/* ---- Accessibility primitives ----
+   Visible keyboard focus for every interactive element. Mouse users still
+   see the default outline-suppressing behavior because focus-visible only
+   matches when the focus came from the keyboard or another a11y path. */
+:focus-visible {
+  outline: 2px solid var(--mauve);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Honor the OS reduced-motion preference. Anything explicitly animated
+   below this rule still works — durations just collapse to near-zero so
+   the layout still updates without distracting movement. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Screen-reader-only utility. Kept around for the SSE aria-live region
+   and any future visually-hidden announcers. */
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 body {
   background: var(--base);
   color: var(--text);
@@ -357,26 +403,6 @@ pre code { background: transparent; color: inherit; padding: 0; }
 .seq-msg-resp  { color: var(--green); border-color: rgba(166,227,161,0.35); }
 .seq-msg-user  { color: var(--pink);  border-color: rgba(245,194,231,0.35); }
 
-/* Tree */
-.tree {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  background: var(--mantle);
-  border: 1px solid var(--surface0);
-  border-radius: 8px;
-  padding: 12px 14px;
-}
-.tree-row {
-  display: grid;
-  grid-template-columns: minmax(220px, max-content) 1fr;
-  gap: 16px;
-  padding: 4px 0;
-  align-items: baseline;
-}
-.tree-name { font-family: ui-monospace, monospace; }
-.tree-desc { color: var(--subtext0); font-size: 0.88rem; }
-
 /* Timeline */
 .timeline {
   list-style: none;
@@ -407,28 +433,9 @@ pre code { background: transparent; color: inherit; padding: 0; }
 .timeline-label { color: var(--text); font-weight: 600; }
 .timeline-at    { color: var(--subtext0); font-size: 0.85rem; }
 
-/* StateChips */
-.state-row {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  gap: 10px;
-  margin: 10px 0;
-}
-.state-chip {
-  background: var(--mantle);
-  border: 1px solid var(--surface0);
-  border-radius: 8px;
-  padding: 10px 12px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  opacity: 0.5;
-  transition: opacity 0.15s, border-color 0.15s;
-}
-.state-chip.active {
-  opacity: 1;
-  border-color: var(--mauve);
-}
+/* State pill — used by the bottom bar; classes are also data-driven via
+   set_state, so the dot/name parts must stay even though the kit's
+   StateChips component was removed. */
 .state-dot {
   width: 10px;
   height: 10px;
@@ -442,13 +449,7 @@ pre code { background: transparent; color: inherit; padding: 0; }
 .state-dot-waiting      { background: var(--yellow); }
 .state-dot-implementing { background: var(--green); }
 .state-dot-errored      { background: var(--red); }
-.state-chip.active .state-dot { animation: pulse 1.6s ease-in-out infinite; }
-@keyframes pulse {
-  0%, 100% { box-shadow: 0 0 0 3px var(--surface0); }
-  50%      { box-shadow: 0 0 0 6px var(--surface0); }
-}
 .state-name { font-family: ui-monospace, monospace; font-size: 0.82rem; color: var(--text); }
-.state-what { font-size: 0.78rem; color: var(--subtext0); margin-left: auto; }
 
 /* CodeBlock */
 .code-block-wrap { position: relative; }
@@ -532,7 +533,7 @@ pre.mermaid svg { max-width: 100%; height: auto; }
 /* Popover (mounted by viewer) */
 .popover {
   position: absolute;
-  z-index: 50;
+  z-index: var(--z-popover);
   width: 280px;
   max-width: calc(100vw - 32px);
   box-sizing: border-box;
@@ -601,7 +602,7 @@ body { padding-bottom: 64px; }
   padding: 8px 14px;
   background: var(--mantle);
   border-top: 1px solid var(--surface1);
-  z-index: 40;
+  z-index: var(--z-bar);
   box-shadow: 0 -4px 18px rgba(0,0,0,0.35);
 }
 .bottom-bar .bb-help {
@@ -1060,7 +1061,7 @@ a.plan-row .when { color: var(--subtext0); font-size: 0.84rem; font-family: ui-m
 .slideshow.fullscreen {
   position: fixed;
   inset: 0;
-  z-index: 100;
+  z-index: var(--z-fullscreen);
   border-radius: 0;
   margin: 0;
 }
@@ -1153,7 +1154,7 @@ a.plan-row .when { color: var(--subtext0); font-size: 0.84rem; font-family: ui-m
 .toast-container {
   position: fixed; bottom: 80px; right: 16px;
   display: flex; flex-direction: column; gap: 8px;
-  z-index: 200; pointer-events: none;
+  z-index: var(--z-toast); pointer-events: none;
 }
 .toast {
   background: var(--surface1);
@@ -1182,7 +1183,7 @@ a.plan-row .when { color: var(--subtext0); font-size: 0.84rem; font-family: ui-m
   border-radius: 10px;
   padding: 16px;
   box-shadow: 0 8px 24px rgba(0,0,0,0.5);
-  z-index: 51;
+  z-index: var(--z-help);
   font-size: 0.88rem;
 }
 .help-panel h6 {
@@ -1230,6 +1231,18 @@ a.plan-row .when { color: var(--subtext0); font-size: 0.84rem; font-family: ui-m
   text-align: left;
 }
 
+/* ---- Generic modal overlay (ask, new-plan, new-tab) ----
+   open_modal uses its own .wp-modal-overlay below; this one is for the
+   smaller in-app modals that wrap a .popover. */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: var(--z-modal);
+}
+
 /* ---- open_modal overlay (one-way display) ---- */
 .wp-modal-overlay {
   position: fixed;
@@ -1239,7 +1252,7 @@ a.plan-row .when { color: var(--subtext0); font-size: 0.84rem; font-family: ui-m
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 80;
+  z-index: var(--z-modal);
   opacity: 0;
   transition: opacity 150ms ease;
   padding: 24px;

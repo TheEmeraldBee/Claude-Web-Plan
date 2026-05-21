@@ -11,13 +11,13 @@
     bar.innerHTML = `
       <button type="button" class="bb-help" title="Help" aria-label="Help">?</button>
       <div class="bb-status" title="Planner state">
-        <span class="state-dot state-dot-idle"></span><span class="state-name">connecting…</span>
+        <span class="state-dot state-dot-idle"></span><span class="state-name" aria-live="polite">connecting…</span>
       </div>
-      <textarea class="bb-chat" rows="1" placeholder="Message the planner…  ( / to focus, ↵ to send, Shift+↵ newline)"></textarea>
+      <textarea class="bb-chat" rows="1" aria-label="Message the planner" placeholder="Message the planner…  ( / to focus, ↵ to send, Shift+↵ newline)"></textarea>
       <button type="button" class="bb-send" title="Send message (↵)">Send</button>
       <button type="button" class="bb-feedback" hidden>Send feedback</button>
       <button type="button" class="bb-accept" hidden>Accept</button>
-      <span class="bb-hint" hidden></span>
+      <span class="bb-hint" role="status" aria-live="polite" hidden></span>
     `;
     document.body.appendChild(bar);
     return bar;
@@ -85,7 +85,50 @@
       else showHint("approved + sent");
     } finally { acceptBtn.disabled = false; }
   });
-  window.__wpBar = { setFeedback, setAccept, showHint, isBusy: () => _busy };
+  window.__wpBar = { setFeedback, setAccept, showHint, isBusy: () => _busy, wireModal: wireWpModal };
+
+  /**
+   * Shared modal behavior: focus trap, Escape-to-close, last-focus
+   * restoration. Caller still owns DOM creation and submit/cancel logic.
+   * Returns a `close()` that fires onClose then removes the overlay.
+   *
+   * Pre-existing modals (ask, new-plan, new-tab) all open and close in
+   * slightly different ways; wireWpModal lets them share the keyboard
+   * + a11y contract without rewriting the create/teardown path.
+   */
+  function wireWpModal(overlay, onClose) {
+    const lastFocus = document.activeElement;
+    const inner = overlay.querySelector(".popover, .wp-modal") || overlay;
+    if (inner && !inner.hasAttribute("tabindex")) inner.setAttribute("tabindex", "-1");
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    setTimeout(() => { try { inner.focus(); } catch {} }, 0);
+
+    function focusables() {
+      return Array.from(overlay.querySelectorAll(
+        'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      ));
+    }
+    function onKey(ev) {
+      if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); close(); return; }
+      if (ev.key !== "Tab") return;
+      const f = focusables();
+      if (f.length === 0) return;
+      const first = f[0]; const last = f[f.length - 1];
+      if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+      else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+    }
+    function close() {
+      document.removeEventListener("keydown", onKey, true);
+      try { onClose && onClose(); } catch {}
+      overlay.remove();
+      if (lastFocus && typeof lastFocus.focus === "function") {
+        try { lastFocus.focus(); } catch {}
+      }
+    }
+    document.addEventListener("keydown", onKey, true);
+    return { close };
+  }
 
   helpBtn.addEventListener("click", toggleHelpPanel);
 
@@ -115,8 +158,26 @@
     document.body.classList.toggle("wp-busy", busy);
     const title = busy ? "Planner is not waiting for input right now" : "";
     [chatBtn, fbBtn, acceptBtn].forEach((el) => { if (el) el.title = title; });
+    // Disable the textarea outright when the planner isn't listening so the
+    // user gets a visible "input disabled" cue (greyed out, no caret) rather
+    // than typing into the void and only learning on submit.
+    if (chatArea) {
+      chatArea.disabled = busy;
+      chatArea.placeholder = busy
+        ? "Planner is busy — message will be queued"
+        : "Message the planner…  ( / to focus, ↵ to send, Shift+↵ newline)";
+    }
   }
-  setBusy(true); // start busy; flips to ready on first "waiting" state SSE
+  setBusy(true); // start busy; flips to ready on first state event
+
+  // Seed the pill from /api/state so first paint reflects reality even if
+  // the SSE handshake hasn't delivered a 'state' event yet. Previously,
+  // pages opened while the agent was already 'waiting' showed
+  // "connecting…" + busy-locked input until the SSE stream caught up.
+  fetch("/api/state")
+    .then((r) => (r.ok ? r.json() : null))
+    .then((s) => { if (s && s.kind) setStateUi(s); })
+    .catch(() => {});
 
   function setStateUi(value) {
     const kind = (value && value.kind) || "idle";
@@ -146,8 +207,14 @@
   }
 
   // ---------- SSE ----------
+  // Track consecutive disconnects so a totally dead server doesn't pin the
+  // browser in an infinite reconnect storm. After 5 failures in a row we
+  // close the connection and offer a manual reconnect via the bottom-bar
+  // hint area. Each successful message resets the counter.
+  let _sseFails = 0;
   const es = new EventSource("/api/stream");
   es.onmessage = (ev) => {
+    _sseFails = 0;
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
     window.dispatchEvent(new CustomEvent("wp:sse", { detail: msg }));
@@ -178,7 +245,15 @@
       }
     }
   };
-  es.onerror = () => { pillName.textContent = "disconnected"; setBusy(true); };
+  es.onerror = () => {
+    pillName.textContent = "disconnected";
+    setBusy(true);
+    _sseFails += 1;
+    if (_sseFails >= 5) {
+      try { es.close(); } catch {}
+      showHint("disconnected — reload the page to reconnect");
+    }
+  };
 
   // ---------- Chat ----------
   async function sendChat() {
@@ -198,7 +273,7 @@
         autoSizeChat();
         if (data.queued) showChatHint("Queued — position " + (data.position || "?"));
       } else {
-        alert("send failed: " + (data.error || r.status));
+        showToast("send failed: " + (data.error || r.status), "error");
       }
     } finally {
       chatBtn.disabled = false;
@@ -461,7 +536,7 @@
       }
     });
 
-    setFeedback({ project: PLAN.project, planId: PLAN.id });
+    setFeedback({ project: PLAN.project, target_kind: "plan", target_id: PLAN.id });
     setAccept({ project: PLAN.project, planId: PLAN.id });
     mountDeleteButton();
     mountBackButton();
@@ -572,7 +647,7 @@
         closePopover();
         showHint("sent to planner");
       } catch (e) {
-        alert("send failed: " + e);
+        showToast("send failed: " + e, "error");
       } finally {
         if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "Generate"; }
       }
@@ -614,11 +689,11 @@
           location.href = "/projects/" + encodeURIComponent(PLAN.project);
         } else {
           const e = await r.json().catch(() => ({}));
-          alert("delete failed: " + (e.error || r.status));
+          showToast("delete failed: " + (e.error || r.status), "error");
           btn.disabled = false;
         }
       } catch (e) {
-        alert("delete failed: " + e);
+        showToast("delete failed: " + e, "error");
         btn.disabled = false;
       }
     });
@@ -679,7 +754,7 @@
           closePopover();
         } else {
           const e = await r.json().catch(() => ({}));
-          alert("delete failed: " + (e.error || r.status));
+          showToast("delete failed: " + (e.error || r.status), "error");
           delBtn.disabled = false;
         }
       });
@@ -699,7 +774,7 @@
         closePopover();
       } else {
         const e = await r.json().catch(() => ({}));
-        alert("save failed: " + (e.error || r.status));
+        showToast("save failed: " + (e.error || r.status), "error");
       }
     });
     setTimeout(() => document.addEventListener("click", outsideClick, true), 0);
@@ -711,8 +786,13 @@
   }
   function closePopover() {
     document.removeEventListener("click", outsideClick, true);
-    document.querySelectorAll(".modal-overlay").forEach((o) => o.remove());
-    document.querySelectorAll(".popover").forEach((p) => p.remove());
+    // Only remove standalone .popover here. .popover inside .modal-overlay
+    // belongs to ask/new-plan/new-tab modals which manage their own lifecycle
+    // — otherwise opening a comment popover would dismiss the active ask
+    // modal and the planner would hang on a pending answer.
+    document.querySelectorAll(".popover").forEach((p) => {
+      if (!p.closest(".modal-overlay")) p.remove();
+    });
   }
   function escapeHtml(s) {
     return s.replace(/[&<>"']/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", "\"":"&quot;", "'":"&#39;" }[c]));
@@ -777,29 +857,13 @@
 
     // Decorate compiled content: highlight code, render mermaid if present.
     if (window.Prism) window.Prism.highlightAllUnder(overlay);
-    if (overlay.querySelector("[data-mermaid]")) ensureMermaidThenRender(overlay);
-  }
-
-  let _wpMermaidPromise = null;
-  function ensureMermaidThenRender(root) {
-    const run = () => {
-      if (!window.mermaid) return;
-      try {
-        window.mermaid.run({ nodes: root.querySelectorAll("pre[data-mermaid]:not([data-rendered])") })
-          .then(() => root.querySelectorAll("pre[data-mermaid]").forEach((el) => el.setAttribute("data-rendered", "true")))
-          .catch(() => {});
-      } catch {}
-    };
-    if (window.mermaid) { run(); return; }
-    if (!_wpMermaidPromise) {
-      _wpMermaidPromise = import("https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs")
-        .then((m) => {
-          window.mermaid = m.default;
-          window.mermaid.initialize({ startOnLoad: false, theme: "dark", themeVariables: { background: "#1e1e2e", primaryColor: "#313244", primaryTextColor: "#cdd6f4", lineColor: "#89b4fa" } });
-        })
-        .catch(() => { _wpMermaidPromise = null; });
+    if (overlay.querySelector("[data-mermaid]")) {
+      // ui/mermaid.js exposes __renderMermaidIn (lazy-loaded). If the page
+      // shell didn't preload it (no <pre data-mermaid> in the initial body),
+      // pull it in once on first modal render.
+      if (window.__renderMermaidIn) window.__renderMermaidIn(overlay);
+      else import("/ui/mermaid.js").then(() => window.__renderMermaidIn(overlay));
     }
-    _wpMermaidPromise.then(run);
   }
 
   // ---------- Ask modal ----------
@@ -807,7 +871,7 @@
     closePopover();
     const overlay = document.createElement("div");
     overlay.className = "modal-overlay";
-    overlay.style.cssText = "position:fixed;inset:0;display:flex;align-items:center;justify-content:center;z-index:59;";
+    overlay.setAttribute("aria-label", "Planner question");
     const wrap = document.createElement("div");
     wrap.className = "popover";
     wrap.style.cssText = "width:520px;max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);overflow-y:auto;";
@@ -815,7 +879,20 @@
       `<div class="row"><button type="button" class="cancel">later</button><button type="button" class="save">submit</button></div>`;
     overlay.appendChild(wrap);
     document.body.appendChild(overlay);
-    wrap.querySelector(".cancel").addEventListener("click", () => overlay.remove());
+    const modal = wireWpModal(overlay);
+    async function dismiss() {
+      // POST empty answers so the server's pending ask_user resolves — otherwise
+      // the planner blocks forever on a closed modal.
+      try {
+        await fetch("/api/answer/" + encodeURIComponent(id), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ answers: (payload.questions || []).map(() => null) }),
+        });
+      } catch {}
+      modal.close();
+    }
+    wrap.querySelector(".cancel").addEventListener("click", dismiss);
     wrap.querySelector(".save").addEventListener("click", async () => {
       const answers = collectAnswers(wrap, payload.questions);
       await fetch("/api/answer/" + encodeURIComponent(id), {
@@ -823,7 +900,7 @@
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ answers }),
       });
-      overlay.remove();
+      modal.close();
     });
   }
   function renderQuestions(qs) {
@@ -890,9 +967,9 @@
         body: JSON.stringify({ text, source: "decisions" }),
       });
       if (r.ok) showChatHint("answers sent to planner");
-      else alert("send failed: " + r.status);
+      else showToast("send failed: " + r.status, "error");
     } catch (e) {
-      alert("send failed: " + e);
+      showToast("send failed: " + e, "error");
     } finally {
       btn.disabled = false;
     }

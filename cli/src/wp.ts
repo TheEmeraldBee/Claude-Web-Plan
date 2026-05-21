@@ -83,7 +83,7 @@ async function cmdFeedback(args: string[]) {
   if (args.length < 2) die("usage: wp feedback <project> <plan_id>");
   const r = await api("/api/feedback", {
     method: "POST",
-    body: JSON.stringify({ project: args[0], planId: args[1] }),
+    body: JSON.stringify({ project: args[0], target_kind: "plan", target_id: args[1] }),
   });
   if (r.ok) {
     console.log("sent.");

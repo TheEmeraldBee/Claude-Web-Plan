@@ -75,15 +75,6 @@ export interface SequenceProps {
   messages: SequenceMessage[];
 }
 
-export interface TreeNode {
-  name: string;
-  desc?: string;
-  children?: TreeNode[];
-}
-export interface TreeProps {
-  root: TreeNode;
-}
-
 export interface TimelineMarker {
   label: string;
   at: string;
@@ -91,18 +82,6 @@ export interface TimelineMarker {
 }
 export interface TimelineProps {
   markers: TimelineMarker[];
-}
-
-export type ClaudeState =
-  | "idle"
-  | "thinking"
-  | "asking"
-  | "waiting"
-  | "implementing"
-  | "errored";
-
-export interface StateChipsProps {
-  current?: ClaudeState;
 }
 
 export interface CodeBlockProps {

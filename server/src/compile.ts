@@ -207,10 +207,3 @@ export async function compileSourceForValidation(source: string, label: string =
   }
 }
 
-export function clearCache() {
-  cache.clear();
-}
-
-export function writeJunkForTest(path: string, source: string) {
-  writeFileSync(path, source, "utf8");
-}

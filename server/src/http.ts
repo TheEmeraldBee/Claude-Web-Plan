@@ -8,6 +8,7 @@ import { Storage, STATUSES, type CommentTargetKind, type PlanStatus } from "./st
 import { compilePlanFile, invalidate } from "./compile.js";
 import { buildTree } from "./layout.js";
 import { resolveTheme, themeToCSS } from "./themes.js";
+import { nowId, slugify } from "./ids.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -53,15 +54,6 @@ function serveStatic(path: string, res: ServerResponse) {
   res.end(readFileSync(path));
 }
 
-function slugify(title: string): string {
-  return title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60) || "plan";
-}
-function nowId(slug: string): string {
-  const d = new Date();
-  const ts = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}-${String(d.getHours()).padStart(2,"0")}${String(d.getMinutes()).padStart(2,"0")}`;
-  return `${ts}-${slug}`;
-}
-
 interface ShellExtras {
   hasMermaid?: boolean;
   planMeta?: { id: string; project: string; status: string; notes: Record<string, string> };
@@ -90,19 +82,11 @@ function renderShell(title: string, body: string, extras: ShellExtras = {}): str
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <link rel="stylesheet" href="/kit/styles.css" />
 ${themeStyle}${metaScripts}
-${hasMermaid ? `<script type="module">
-  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
-  mermaid.initialize({ startOnLoad: false, theme: "dark", themeVariables: { background: "#1e1e2e", primaryColor: "#313244", primaryTextColor: "#cdd6f4", lineColor: "#89b4fa" } });
-  function renderMermaid() { mermaid.run({ querySelector: "pre[data-mermaid]:not([data-rendered])" }).then(()=>document.querySelectorAll("pre[data-mermaid]").forEach(el=>el.setAttribute("data-rendered","true"))); }
-  window.addEventListener("DOMContentLoaded", renderMermaid);
-  window.__renderMermaid = renderMermaid;
-</script>` : ""}
+${hasMermaid ? `<script type="module" src="/ui/mermaid.js"></script>` : ""}
 </head><body><div class="page">${body}</div>
 <script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/prismjs@1/plugins/autoloader/prism-autoloader.min.js"></script>
 <script>Prism.plugins.autoloader.languages_path = "https://cdn.jsdelivr.net/npm/prismjs@1/components/";</script>
-<script type="module" src="/ui/submit.js"></script>
-<script type="module" src="/ui/chrome.js"></script>
 <script type="module" src="/ui/app.js"></script>
 ${extraScripts ?? ""}
 </body></html>`;
@@ -120,6 +104,9 @@ async function handleSse(req: IncomingMessage, res: ServerResponse) {
     "connection": "keep-alive",
     "x-accel-buffering": "no",
   });
+  // Suggest a 1.5s reconnect delay (default is 3s). Server restarts during
+  // dev are common; faster reconnect makes the dashboard feel less stale.
+  res.write("retry: 1500\n");
   res.write(": connected\n\n");
   const id = state.addSubscriber((data) => {
     res.write(`data: ${JSON.stringify(data)}\n\n`);
@@ -148,9 +135,9 @@ async function handleAnswer(req: IncomingMessage, res: ServerResponse, askId: st
   const body = await readBody(req);
   let parsed: { answers?: unknown[]; request_id?: string };
   try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
-  const p = state.pending.get(askId);
+  const p = state.takePending(askId);
   if (!p || p.kind !== "ask_user") return sendJson(res, 404, { error: "unknown_ask_id" });
-  state.pending.delete(askId);
+  if (p.timeout) clearTimeout(p.timeout);
   p.resolve({ questions: p.questions, answers: parsed.answers ?? [] });
   state.ack(parsed.request_id, { route: "answer" });
   jsonOk(res, parsed.request_id);
@@ -589,9 +576,10 @@ async function handleCreateTab(req: IncomingMessage, res: ServerResponse) {
 }
 
 // ---------- router ----------
+const LOCALHOST_ADDRS = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 async function router(req: IncomingMessage, res: ServerResponse) {
   const remote = req.socket.remoteAddress ?? "";
-  if (!remote.includes("127.0.0.1") && !remote.includes("::1") && remote !== "::ffff:127.0.0.1") {
+  if (!LOCALHOST_ADDRS.has(remote)) {
     return send(res, 403, "localhost only");
   }
   const url = new URL(req.url ?? "/", `http://localhost:${config.port}`);
