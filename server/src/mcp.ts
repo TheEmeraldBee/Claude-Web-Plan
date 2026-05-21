@@ -5,7 +5,6 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { spawn } from "node:child_process";
 
 import { startHttp, config, storage } from "./http.js";
 import { state, type AskedQuestion } from "./state.js";
@@ -15,6 +14,7 @@ import {
   appendBlock,
   blockIdsIn,
   replaceBlock,
+  validateModalSource,
   validatePlanSource,
   validateReplacementBlock,
 } from "./blocks.js";
@@ -129,11 +129,6 @@ const ListPlansSchema = z.object({
   project: z.string().optional(),
 });
 
-const OpenSchema = z.object({
-  project: z.string().optional(),
-  plan_id: z.string().optional(),
-});
-
 const SetProjectMetaSchema = z.object({
   project: z.string().optional(),
   name: z.string().optional(),
@@ -180,6 +175,12 @@ const InitHomepageSchema = z.object({
 });
 
 const ListCommentsSchema = z.object({
+  project: z.string().optional(),
+});
+
+const OpenModalSchema = z.object({
+  title: z.string().min(1),
+  source: z.string().min(1),
   project: z.string().optional(),
 });
 
@@ -270,7 +271,6 @@ async function callToolImpl(name: string, args: unknown, signal?: AbortSignal): 
       });
       const url = `http://localhost:${config.port}/plans/${encodeURIComponent(project)}/${encodeURIComponent(id)}`;
       state.broadcast({ type: "plan.created", planId: id, project });
-      maybeOpen(url, "always");
       return ok({ plan_id: id, project, url });
     }
 
@@ -416,12 +416,25 @@ async function callToolImpl(name: string, args: unknown, signal?: AbortSignal): 
       return ok(meta);
     }
 
-    case "open_in_browser": {
-      const a = OpenSchema.parse(args);
-      const path = a.plan_id ? `/plans/${encodeURIComponent(defaultProject(a.project))}/${encodeURIComponent(a.plan_id)}` : "/";
-      const url = `http://localhost:${config.port}${path}`;
-      maybeOpen(url, "always");
-      return ok({ url });
+    case "open_modal": {
+      const a = OpenModalSchema.parse(args);
+      const project = defaultProject(a.project);
+      try { validateModalSource(a.source); }
+      catch (e) { return err(e instanceof Error ? e.message : String(e)); }
+      let html: string;
+      try {
+        const result = await compileSourceForValidation(a.source, `modal-${slugify(a.title)}`);
+        html = result.html;
+      } catch (e) {
+        return err(`compile_failed: ${formatCompileError(e)}`);
+      }
+      storage.ensureProject(project);
+      const id = nowId(slugify(a.title));
+      const now = new Date().toISOString();
+      const meta = { id, title: a.title, project, created: now };
+      storage.writeModal({ meta, source: a.source, html });
+      state.broadcast({ type: "modal.open", project, id, title: a.title, html });
+      return ok({ id, project });
     }
 
     case "delete_plan": {
@@ -510,7 +523,6 @@ ${planItems(done)}
       invalidate(storage.tabPath(project, "home"));
       state.broadcast({ type: "tab.updated", project, tabId: "home" });
       const url = `http://localhost:${config.port}/projects/${encodeURIComponent(project)}?tab=home`;
-      maybeOpen(url, "always");
       return ok({ project, tab_id: "home", url });
     }
 
@@ -596,20 +608,6 @@ ${planItems(done)}
   }
 }
 
-function maybeOpen(url: string, policy: "always" | "on-ask" | "never") {
-  const effective = policy === "always" ? "always" : config.autoLaunch;
-  if (effective === "never") return;
-  if (!config.openCommand) return;
-  const cmd = config.openCommand.replace(/\{url\}/g, url);
-  try {
-    const parts = cmd.split(/\s+/).filter(Boolean);
-    if (parts.length === 0) return;
-    spawn(parts[0]!, parts.slice(1), { stdio: "ignore", detached: true }).unref();
-  } catch (e) {
-    console.error(`[web-planner] open command failed: ${e instanceof Error ? e.message : String(e)}`);
-  }
-}
-
 // ---------- MCP wiring ----------
 
 const TOOLS = [
@@ -623,7 +621,6 @@ const TOOLS = [
   { name: "set_state", description: "Override the activity state surfaced by the dashboard pill (e.g. 'implementing' while editing files).", inputSchema: { type: "object", properties: { state: { type: "string" } }, required: ["state"] } },
   { name: "list_plans", description: "List plans for a project (or all projects).", inputSchema: { type: "object", properties: { project: { type: "string" } } } },
   { name: "get_plan", description: "Read a plan: source, notes, block ids. Notes are the unified comments scoped to this plan.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, project: { type: "string" } }, required: ["plan_id"] } },
-  { name: "open_in_browser", description: "Spawn the configured open-command against a plan or the dashboard.", inputSchema: { type: "object", properties: { plan_id: { type: "string" }, project: { type: "string" } } } },
   { name: "set_project_meta", description: "Set a project's name, description, and/or watchPath (source dir for the Layout tab).", inputSchema: { type: "object", properties: { project: { type: "string" }, name: { type: "string" }, description: { type: "string" }, watch_path: { type: "string" } } } },
   { name: "create_tab", description: "Create a custom tab on a project's page from a Preact .tab.tsx source. id must be lowercase kebab. Dry-compiled before persisting.", inputSchema: { type: "object", properties: { project: { type: "string" }, id: { type: "string" }, title: { type: "string" }, source: { type: "string" } }, required: ["id","title","source"] } },
   { name: "update_tab", description: "Update an existing custom tab's source. Dry-compiled before persisting.", inputSchema: { type: "object", properties: { project: { type: "string" }, id: { type: "string" }, title: { type: "string" }, source: { type: "string" } }, required: ["id","source"] } },
@@ -634,6 +631,7 @@ const TOOLS = [
   { name: "init_project_homepage", description: "Create or regenerate the Home tab: project header, plan counts, plan links, and a DecisionPanel quick-start.", inputSchema: { type: "object", properties: { project: { type: "string" } } } },
   { name: "list_comments", description: "Return EVERY open comment in the project, across plans and tabs. Each comment carries target_kind ('plan'|'tab'), target_id, target_title, block_id, text, and timestamps. Use this on resume to sweep for anything that arrived while you were busy.", inputSchema: { type: "object", properties: { project: { type: "string" } } } },
   { name: "get_comments", description: "Return comments for one target — pass exactly one of plan_id or tab_id. Returns the same enriched shape as list_comments, scoped.", inputSchema: { type: "object", properties: { project: { type: "string" }, plan_id: { type: "string" }, tab_id: { type: "string" } } } },
+  { name: "open_modal", description: "Display a one-way modal in the browser. `source` is a full Preact .modal.tsx whose root is `<div class=\"modal-body\">` (NOT `<Plan>`) — the modal chrome supplies the title bar. Use kit blocks (Block, Callout, Mermaid, CodeBlock, …); no markdown. Source is dry-compiled before sending. Past modals are archived on the project's Modals tab.", inputSchema: { type: "object", properties: { title: { type: "string" }, source: { type: "string" }, project: { type: "string" } }, required: ["title","source"] } },
 ];
 
 function spawnExistingWatchers() {

@@ -59,6 +59,19 @@ export interface ProjectMeta {
   modified: string;
 }
 
+export interface ModalMeta {
+  id: string;         // <ts>-<slug>
+  title: string;
+  project: string;
+  created: string;    // ISO
+}
+
+export interface ModalRecord {
+  meta: ModalMeta;
+  source: string;     // .modal.tsx source
+  html: string;       // compiled body html (cache)
+}
+
 export type CommentTargetKind = "plan" | "tab";
 export interface Comment {
   id: string;
@@ -76,8 +89,12 @@ const NOTES_SUFFIX = ".notes.json"; // legacy — migrated then deleted
 const COMMENTS_FILE = "comments.json";
 const PROJECT_META = "project.json";
 const TAB_SUFFIX = ".tab.tsx";
+const MODAL_SUFFIX = ".modal.tsx";
+const MODAL_META_SUFFIX = ".modal.meta.json";
+const MODAL_HTML_SUFFIX = ".modal.html";
 const BUILTIN_TABS: TabRef[] = [
   { id: "plans", title: "Plans", kind: "builtin" },
+  { id: "modals", title: "Modals", kind: "builtin" },
   { id: "layout", title: "Layout", kind: "builtin" },
 ];
 
@@ -103,8 +120,12 @@ export class Storage {
   projectDir(project: string): string { return join(this.root, "projects", project); }
   plansDir(project: string): string { return join(this.projectDir(project), "plans"); }
   tabsDir(project: string): string { return join(this.projectDir(project), "tabs"); }
+  modalsDir(project: string): string { return join(this.projectDir(project), "modals"); }
   componentsPath(project: string): string { return join(this.projectDir(project), "components.tsx"); }
   tabPath(project: string, tabId: string): string { return join(this.tabsDir(project), tabId + TAB_SUFFIX); }
+  modalPath(project: string, id: string): string { return join(this.modalsDir(project), id + MODAL_SUFFIX); }
+  modalMetaPath(project: string, id: string): string { return join(this.modalsDir(project), id + MODAL_META_SUFFIX); }
+  modalHtmlPath(project: string, id: string): string { return join(this.modalsDir(project), id + MODAL_HTML_SUFFIX); }
   commentsPath(project: string): string { return join(this.projectDir(project), COMMENTS_FILE); }
   basePath(project: string, planId: string): string { return join(this.plansDir(project), planId); }
 
@@ -112,6 +133,7 @@ export class Storage {
   ensureProject(project: string) {
     ensureDir(this.plansDir(project));
     ensureDir(this.tabsDir(project));
+    ensureDir(this.modalsDir(project));
     const comps = this.componentsPath(project);
     if (!existsSync(comps)) {
       atomicWrite(comps, "// per-project component extensions\n// Claude appends new components here as it invents new block kinds.\n\nexport {};\n");
@@ -264,6 +286,60 @@ export class Storage {
     return metas.sort((a, b) => (a.created < b.created ? 1 : -1));
   }
 
+  // ---------- modals ----------
+  writeModal(rec: ModalRecord): void {
+    this.ensureProject(rec.meta.project);
+    atomicWrite(this.modalPath(rec.meta.project, rec.meta.id), rec.source);
+    atomicWrite(this.modalMetaPath(rec.meta.project, rec.meta.id), JSON.stringify(rec.meta, null, 2));
+    atomicWrite(this.modalHtmlPath(rec.meta.project, rec.meta.id), rec.html);
+  }
+
+  readModal(project: string, id: string): ModalRecord | null {
+    const metaP = this.modalMetaPath(project, id);
+    const srcP = this.modalPath(project, id);
+    const htmlP = this.modalHtmlPath(project, id);
+    if (!existsSync(metaP) || !existsSync(srcP) || !existsSync(htmlP)) return null;
+    try {
+      const meta = JSON.parse(readFileSync(metaP, "utf8")) as ModalMeta;
+      const source = readFileSync(srcP, "utf8");
+      const html = readFileSync(htmlP, "utf8");
+      return { meta, source, html };
+    } catch { return null; }
+  }
+
+  listModals(project: string): ModalMeta[] {
+    const dir = this.modalsDir(project);
+    if (!existsSync(dir)) return [];
+    const metas: ModalMeta[] = [];
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith(MODAL_META_SUFFIX)) continue;
+      try {
+        metas.push(JSON.parse(readFileSync(join(dir, name), "utf8")) as ModalMeta);
+      } catch { /* skip */ }
+    }
+    return metas.sort((a, b) => (a.created < b.created ? 1 : -1));
+  }
+
+  deleteModal(project: string, id: string): boolean {
+    let removed = false;
+    for (const ext of [MODAL_SUFFIX, MODAL_META_SUFFIX, MODAL_HTML_SUFFIX]) {
+      const p = join(this.modalsDir(project), id + ext);
+      if (existsSync(p)) { rmSync(p); removed = true; }
+    }
+    return removed;
+  }
+
+  clearModals(project: string): number {
+    const dir = this.modalsDir(project);
+    if (!existsSync(dir)) return 0;
+    let n = 0;
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name);
+      try { rmSync(p); n++; } catch { /* skip */ }
+    }
+    return n;
+  }
+
   // ---------- comments (unified) ----------
   private readComments(project: string): Comment[] {
     const p = this.commentsPath(project);
@@ -358,6 +434,21 @@ export class Storage {
   }
 
   private migrateProject(project: string) {
+    // 0. Ensure the builtin 'modals' tab is present (added in the open_modal feature).
+    const metaPath = join(this.projectDir(project), PROJECT_META);
+    if (existsSync(metaPath)) {
+      try {
+        const meta = JSON.parse(readFileSync(metaPath, "utf8")) as ProjectMeta;
+        if (!meta.tabs.some((t) => t.id === "modals")) {
+          const layoutIdx = meta.tabs.findIndex((t) => t.id === "layout");
+          const entry: TabRef = { id: "modals", title: "Modals", kind: "builtin" };
+          if (layoutIdx === -1) meta.tabs.push(entry);
+          else meta.tabs.splice(layoutIdx, 0, entry);
+          atomicWrite(metaPath, JSON.stringify(meta, null, 2));
+        }
+      } catch { /* skip */ }
+    }
+
     // 1. Migrate plan meta.json statuses + drop legacy notes files (folding into comments.json)
     const aggregated: Comment[] = this.readComments(project);
     const seen = new Set(aggregated.map((c) => `${c.target_kind}|${c.target_id}|${c.block_id}`));

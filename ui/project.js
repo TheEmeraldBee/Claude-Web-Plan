@@ -490,12 +490,58 @@
   // ---------- Post-render init (called after any panel HTML swap) ----------
   function postRenderInit(activeTab) {
     if (activeTab === "plans") { mountNewPlanBtn(); mountPlanSearch(); }
+    if (activeTab === "modals") wireModalsTab();
     if (window.__renderMermaid) window.__renderMermaid();
     const tabMeta = window.__TAB__;
     if (tabMeta && tabMeta.tabId === activeTab) {
       wireCustomTabComments(activeTab);
     } else if (window.__wpBar) {
       window.__wpBar.setFeedback(null);
+    }
+  }
+
+  function wireModalsTab() {
+    panel.querySelectorAll(".modals-reopen").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.getAttribute("data-modal-id");
+        if (!id) return;
+        btn.disabled = true;
+        try {
+          await fetch("/api/modal/reopen", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ project, id }),
+          });
+        } finally { btn.disabled = false; }
+      });
+    });
+    panel.querySelectorAll(".modals-delete").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.getAttribute("data-modal-id");
+        if (!id) return;
+        if (!confirm("Delete this modal? This is permanent.")) return;
+        btn.disabled = true;
+        try {
+          const r = await fetch("/api/modal/delete", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ project, id }),
+          });
+          if (r.ok) refetchActiveTab();
+        } finally { btn.disabled = false; }
+      });
+    });
+    const clearAll = panel.querySelector(".modals-clear-all");
+    if (clearAll) {
+      clearAll.addEventListener("click", async () => {
+        if (!confirm("Clear all modal history? This is permanent.")) return;
+        clearAll.disabled = true;
+        try {
+          const r = await fetch("/api/modals/clear", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ project }),
+          });
+          if (r.ok) refetchActiveTab();
+        } finally { clearAll.disabled = false; }
+      });
     }
   }
 
@@ -530,6 +576,9 @@
     if ((msg.type === "plan.deleted" || msg.type === "plan.created" || msg.type === "plan.status") && msg.project === project) {
       const active = page.getAttribute("data-active-tab");
       if (active === "plans") refetchActiveTab();
+    }
+    if ((msg.type === "modal.open" || msg.type === "modal.deleted" || msg.type === "modals.cleared") && msg.project === project) {
+      if (page.getAttribute("data-active-tab") === "modals") refetchActiveTab();
     }
     if ((msg.type === "tab:comment:set" || msg.type === "tab:comment:cleared") && msg.project === project) {
       const active = page.getAttribute("data-active-tab");

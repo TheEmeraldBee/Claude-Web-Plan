@@ -115,3 +115,33 @@ export function validatePlanSource(source: string): PlanValidation {
   if (!hasPlanRoot) throw new Error("missing_plan_root");
   return { blockIds: ids, hasPlanRoot };
 }
+
+/**
+ * Validate a modal source. Modal sources are like plans/tabs but the root MUST NOT
+ * be <Plan> — the browser modal chrome supplies its own header. We require a
+ * default export and a top-level wrapper element (any element); block ids are
+ * still expected and must be unique. Used by open_modal.
+ */
+export function validateModalSource(source: string): { blockIds: string[] } {
+  try {
+    transformSync(source, {
+      loader: "tsx",
+      jsx: "preserve",
+      sourcefile: "modal.tsx",
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`modal_parse_failed: ${msg}`);
+  }
+  if (/<Plan\b/.test(source)) {
+    throw new Error("modal_has_plan_root: modal source must not wrap in <Plan>; use <div class=\"modal-body\">…</div> instead (the modal chrome supplies the title bar).");
+  }
+  if (!/export\s+default\b/.test(source)) {
+    throw new Error("modal_missing_default_export: modal source must `export default () => (...)`");
+  }
+  const blocks = findBlocks(source);
+  const ids = blocks.map((b) => b.id);
+  const dup = ids.find((id, i) => ids.indexOf(id) !== i);
+  if (dup) throw new Error(`duplicate_block_id: ${dup}`);
+  return { blockIds: ids };
+}

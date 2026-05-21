@@ -168,6 +168,7 @@
     if (msg.type === "block.appended" || msg.type === "plan.created" || msg.type === "plan.updated") {
       if (PLAN && msg.planId === PLAN.id) setTimeout(() => location.reload(), 200);
     }
+    if (msg.type === "modal.open") enqueueWpModal(msg);
     if (msg.type === "plan.deleted") {
       if (PLAN && msg.planId === PLAN.id) {
         location.href = "/projects/" + encodeURIComponent(PLAN.project);
@@ -715,6 +716,90 @@
   }
   function escapeHtml(s) {
     return s.replace(/[&<>"']/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", "\"":"&quot;", "'":"&#39;" }[c]));
+  }
+
+  // ---------- open_modal overlay ----------
+  // One-way display modal for results that Claude wants to surface (research,
+  // reports, etc). Rendered HTML is precompiled server-side from a .modal.tsx.
+  // We just inject and decorate.
+  const _wpModalQueue = [];
+  let _wpModalVisible = false;
+  let _wpModalLastFocus = null;
+
+  function enqueueWpModal(msg) {
+    if (!msg || typeof msg.html !== "string") return;
+    _wpModalQueue.push(msg);
+    if (!_wpModalVisible) renderNextWpModal();
+  }
+
+  function renderNextWpModal() {
+    const next = _wpModalQueue.shift();
+    if (!next) { _wpModalVisible = false; return; }
+    _wpModalVisible = true;
+    _wpModalLastFocus = document.activeElement;
+    const overlay = document.createElement("div");
+    overlay.className = "wp-modal-overlay";
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.innerHTML = `
+      <div class="wp-modal" tabindex="-1">
+        <header class="wp-modal-head">
+          <h2 class="wp-modal-title"></h2>
+          <button type="button" class="wp-modal-close" aria-label="Close">×</button>
+        </header>
+        <div class="wp-modal-body"></div>
+      </div>`;
+    overlay.querySelector(".wp-modal-title").textContent = next.title || "";
+    overlay.querySelector(".wp-modal-body").innerHTML = next.html;
+    document.body.appendChild(overlay);
+    requestAnimationFrame(() => overlay.classList.add("wp-modal-visible"));
+    const modalEl = overlay.querySelector(".wp-modal");
+    modalEl.focus();
+
+    function close() {
+      document.removeEventListener("keydown", onKey, true);
+      overlay.classList.remove("wp-modal-visible");
+      setTimeout(() => {
+        overlay.remove();
+        if (_wpModalLastFocus && typeof _wpModalLastFocus.focus === "function") {
+          try { _wpModalLastFocus.focus(); } catch {}
+        }
+        _wpModalLastFocus = null;
+        renderNextWpModal();
+      }, 150);
+    }
+    function onKey(ev) {
+      if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); close(); }
+    }
+    overlay.querySelector(".wp-modal-close").addEventListener("click", close);
+    overlay.addEventListener("click", (ev) => { if (ev.target === overlay) close(); });
+    document.addEventListener("keydown", onKey, true);
+
+    // Decorate compiled content: highlight code, render mermaid if present.
+    if (window.Prism) window.Prism.highlightAllUnder(overlay);
+    if (overlay.querySelector("[data-mermaid]")) ensureMermaidThenRender(overlay);
+  }
+
+  let _wpMermaidPromise = null;
+  function ensureMermaidThenRender(root) {
+    const run = () => {
+      if (!window.mermaid) return;
+      try {
+        window.mermaid.run({ nodes: root.querySelectorAll("pre[data-mermaid]:not([data-rendered])") })
+          .then(() => root.querySelectorAll("pre[data-mermaid]").forEach((el) => el.setAttribute("data-rendered", "true")))
+          .catch(() => {});
+      } catch {}
+    };
+    if (window.mermaid) { run(); return; }
+    if (!_wpMermaidPromise) {
+      _wpMermaidPromise = import("https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs")
+        .then((m) => {
+          window.mermaid = m.default;
+          window.mermaid.initialize({ startOnLoad: false, theme: "dark", themeVariables: { background: "#1e1e2e", primaryColor: "#313244", primaryTextColor: "#cdd6f4", lineColor: "#89b4fa" } });
+        })
+        .catch(() => { _wpMermaidPromise = null; });
+    }
+    _wpMermaidPromise.then(run);
   }
 
   // ---------- Ask modal ----------

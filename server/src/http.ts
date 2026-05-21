@@ -386,6 +386,24 @@ async function renderBuiltinTab(project: string, tabId: string): Promise<string>
     };
     return `${empty}<div class="kanban">${COLUMNS.map((c) => column(c.label, c.status)).join("")}</div>`;
   }
+  if (tabId === "modals") {
+    const modals = storage.listModals(project);
+    if (modals.length === 0) {
+      return `<div class="modals-empty">No modals yet. The planner uses <code>open_modal</code> to surface research and other findings.</div>`;
+    }
+    const rows = modals.map((m) => `<div class="modals-row" data-modal-id="${escapeHtml(m.id)}">
+      <span class="modals-when">${escapeHtml(m.created.slice(0, 16).replace("T", " "))}</span>
+      <span class="modals-title">${escapeHtml(m.title)}</span>
+      <button type="button" class="modals-reopen" data-modal-id="${escapeHtml(m.id)}">Reopen</button>
+      <button type="button" class="modals-delete" data-modal-id="${escapeHtml(m.id)}" title="delete">×</button>
+    </div>`).join("");
+    return `<div class="modals-pane">
+      <div class="modals-toolbar">
+        <button type="button" class="modals-clear-all">Clear all</button>
+      </div>
+      <div class="modals-timeline">${rows}</div>
+    </div>`;
+  }
   if (tabId === "layout") {
     const meta = storage.readProject(project);
     const path = meta?.watchPath || "";
@@ -519,6 +537,44 @@ async function handleCreatePlanStub(req: IncomingMessage, res: ServerResponse) {
   jsonOk(res, request_id, { planId: id, url, queued: r.queued });
 }
 
+async function handleModalReopen(req: IncomingMessage, res: ServerResponse) {
+  const body = await readBody(req);
+  let parsed: { project?: string; id?: string; request_id?: string };
+  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
+  const { project, id, request_id } = parsed;
+  if (!project || !id) return sendJson(res, 400, { error: "missing_fields" });
+  const rec = storage.readModal(project, id);
+  if (!rec) return sendJson(res, 404, { error: "modal_not_found" });
+  state.broadcast({ type: "modal.open", project, id, title: rec.meta.title, html: rec.html });
+  state.ack(request_id, { route: "modal/reopen" });
+  jsonOk(res, request_id);
+}
+
+async function handleModalDelete(req: IncomingMessage, res: ServerResponse) {
+  const body = await readBody(req);
+  let parsed: { project?: string; id?: string; request_id?: string };
+  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
+  const { project, id, request_id } = parsed;
+  if (!project || !id) return sendJson(res, 400, { error: "missing_fields" });
+  const removed = storage.deleteModal(project, id);
+  if (!removed) return sendJson(res, 404, { error: "modal_not_found" });
+  state.broadcast({ type: "modal.deleted", project, id });
+  state.ack(request_id, { route: "modal/delete" });
+  jsonOk(res, request_id);
+}
+
+async function handleModalsClear(req: IncomingMessage, res: ServerResponse) {
+  const body = await readBody(req);
+  let parsed: { project?: string; request_id?: string };
+  try { parsed = JSON.parse(body); } catch { return sendJson(res, 400, { error: "bad_json" }); }
+  const { project, request_id } = parsed;
+  if (!project) return sendJson(res, 400, { error: "missing_fields" });
+  const n = storage.clearModals(project);
+  state.broadcast({ type: "modals.cleared", project, count: n });
+  state.ack(request_id, { route: "modals/clear" });
+  jsonOk(res, request_id, { count: n });
+}
+
 async function handleCreateTab(req: IncomingMessage, res: ServerResponse) {
   const body = await readBody(req);
   let parsed: { project?: string; title?: string; purpose?: string; request_id?: string };
@@ -567,6 +623,9 @@ async function router(req: IncomingMessage, res: ServerResponse) {
     if (m === "POST" && url.pathname === "/api/generate-block") return handleGenerateBlock(req, res);
     if (m === "POST" && url.pathname === "/api/create-plan-stub") return handleCreatePlanStub(req, res);
     if (m === "POST" && url.pathname === "/api/create-tab") return handleCreateTab(req, res);
+    if (m === "POST" && url.pathname === "/api/modal/reopen") return handleModalReopen(req, res);
+    if (m === "POST" && url.pathname === "/api/modal/delete") return handleModalDelete(req, res);
+    if (m === "POST" && url.pathname === "/api/modals/clear") return handleModalsClear(req, res);
     const ansMatch = url.pathname.match(/^\/api\/answer\/([\w-]+)$/);
     if (m === "POST" && ansMatch) return handleAnswer(req, res, ansMatch[1] as string);
 
